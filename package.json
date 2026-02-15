@@ -1,0 +1,42 @@
+{
+  "name": "myclaw",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A CLI coding agent inspired by Claude Code",
+  "type": "module",
+  "bin": {
+    "myclaw": "./bin/run.js"
+  },
+  "files": [
+    "bin",
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsx bin/dev.js",
+    "test": "vitest run",
+    "lint": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@oclif/core": "^4.2.9",
+    "better-sqlite3": "^11.8.1",
+    "cosmiconfig": "^9.0.0",
+    "dotenv": "^16.5.0",
+    "execa": "^9.6.0",
+    "openai": "^6.22.0",
+    "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.10",
+    "tsx": "^4.19.3",
+    "typescript": "^5.8.2",
+    "vitest": "^3.0.9"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "oclif": {
+    "commands": "./dist/commands",
+    "topicSeparator": " "
+  }
+}
