@@ -18,17 +18,26 @@ A CLI coding agent scaffold (TypeScript + oclif).
 ```bash
 npm install
 npm run build
-cp .env.example .env
-# fill OPENAI_API_KEY in .env
-# optional: set model in env
-# OPENAI_MODEL=gpt-4o-mini
-# optional: for openai-compatible third-party endpoint
-# OPENAI_BASE_URL=https://your-endpoint/v1
 node ./bin/run.js init -f
+# then fill credentials in ~/.myclaw/.env (or $MYCLAW_HOME/.env)
 ```
 
 `OPENAI_BASE_URL` and `.myclawrc.json` `baseURL` both support OpenAI-compatible providers.
 Model priority: `.myclawrc.json` `model` > `OPENAI_MODEL` > `gpt-4o-mini`.
+
+## Global Home Directory
+
+- Default home: `~/.myclaw`
+- Override with env: `MYCLAW_HOME=/custom/path`
+- Global env file: `~/.myclaw/.env`
+- Memory file: `~/.myclaw/memory.md`
+
+Create your global env:
+
+```bash
+cp ~/.myclaw/.env.example ~/.myclaw/.env
+# edit ~/.myclaw/.env
+```
 
 ## Commands
 

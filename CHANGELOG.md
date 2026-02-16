@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.1.1 - 2026-02-16
+
+### Added
+- Global home directory support (`~/.myclaw` or `$MYCLAW_HOME`).
+- Global environment loading from `~/.myclaw/.env` before local `.env`.
+- Memory path defaults (`~/.myclaw/memory.md`) exposed in config.
+- Interactive approval prompt for sensitive shell commands (`WAITING FOR USER INPUT`).
+
+### Changed
+- `init` now creates global home assets: `.env.example` and `memory.md`.
+- Sensitive prompt styling updated with red warning markers.
+
 ## v0.1.0-alpha - 2026-02-16
 
 ### Added

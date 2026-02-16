@@ -1,11 +1,11 @@
 {
-  "name": "myclaw",
-  "version": "0.1.0",
-  "private": true,
+  "name": "@sworddut/myclaw",
+  "version": "0.1.1",
+  "private": false,
   "description": "A CLI coding agent inspired by Claude Code",
   "type": "module",
   "bin": {
-    "myclaw": "./bin/run.js"
+    "myclaw": "bin/run.js"
   },
   "files": [
     "bin",
