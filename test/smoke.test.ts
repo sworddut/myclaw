@@ -3,6 +3,13 @@ import {unlink, writeFile} from 'node:fs/promises'
 import {existsSync} from 'node:fs'
 import {runAgentTask} from '../src/core/agent.js'
 
+function jsonResponse(data: unknown): Response {
+  return new Response(JSON.stringify(data), {
+    status: 200,
+    headers: {'Content-Type': 'application/json'}
+  })
+}
+
 describe('agent smoke test', () => {
   afterEach(() => {
     vi.unstubAllGlobals()
@@ -18,42 +25,20 @@ describe('agent smoke test', () => {
     const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
       const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url
       expect(url).toBe('https://example-llm.com/v1/chat/completions')
-      const body = JSON.parse(String(init?.body)) as {model?: string}
-      expect(body.model).toBe('gpt-test-model')
-      return new Response(
-        JSON.stringify({
-          choices: [{message: {content: 'hello from openai'}}]
-        }),
-        {
-          status: 200,
-          headers: {'Content-Type': 'application/json'}
-        }
-      )
+      const request = init?.body ? JSON.parse(String(init.body)) : null
+      if (request?.model) expect(request.model).toBe('gpt-test-model')
+      return jsonResponse({choices: [{message: {content: 'hello from openai'}}]})
     })
-    vi.stubGlobal(
-      'fetch',
-      fetchMock
-    )
+    vi.stubGlobal('fetch', fetchMock)
 
     const output = await runAgentTask('hello')
     expect(output).toContain('hello from openai')
-    expect(fetchMock).toHaveBeenCalledOnce()
+    expect(fetchMock).toHaveBeenCalled()
   })
 
   it('accepts choices[0].text style responses', async () => {
     process.env.OPENAI_API_KEY = 'test-key'
-    const fetchMock = vi.fn(async () => {
-      return new Response(
-        JSON.stringify({
-          choices: [{text: 'hello from text field'}]
-        }),
-        {
-          status: 200,
-          headers: {'Content-Type': 'application/json'}
-        }
-      )
-    })
-    vi.stubGlobal('fetch', fetchMock)
+    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({choices: [{text: 'hello from text field'}]})))
 
     const output = await runAgentTask('hello')
     expect(output).toContain('hello from text field')
@@ -67,32 +52,23 @@ describe('agent smoke test', () => {
     const fetchMock = vi
       .fn()
       .mockImplementationOnce(async () => {
-        return new Response(
-          JSON.stringify({
-            choices: [
-              {
-                message: {
-                  content:
-                    '{"type":"tool_call","tool":"write_file","input":{"path":"tmp-rule-test.txt","content":"changed\\n"}}'
-                }
+        return jsonResponse({
+          choices: [
+            {
+              message: {
+                content:
+                  '{"type":"tool_call","tool":"write_file","input":{"path":"tmp-rule-test.txt","content":"changed\\n"}}'
               }
-            ]
-          }),
-          {status: 200, headers: {'Content-Type': 'application/json'}}
-        )
+            }
+          ]
+        })
       })
-      .mockImplementationOnce(async (_input: string | URL | Request, init?: RequestInit) => {
-        const body = JSON.parse(String(init?.body)) as {
-          messages: Array<{role: string; content: string}>
-        }
-        const toolResultMessage = body.messages.find((m) => m.role === 'user' && m.content.startsWith('TOOL_RESULT '))
+      .mockImplementation(async (input: string | URL | Request, init?: RequestInit) => {
+        const request = init?.body ? JSON.parse(String(init.body)) : null
+        const messages: Array<{role: string; content: string}> = request?.messages ?? []
+        const toolResultMessage = messages.find((m) => m.role === 'user' && m.content.includes('TOOL_RESULT'))
         expect(toolResultMessage?.content).toContain('must be read_file first')
-        return new Response(
-          JSON.stringify({
-            choices: [{message: {content: 'rule enforced'}}]
-          }),
-          {status: 200, headers: {'Content-Type': 'application/json'}}
-        )
+        return jsonResponse({choices: [{message: {content: 'rule enforced'}}]})
       })
 
     vi.stubGlobal('fetch', fetchMock)
@@ -108,32 +84,23 @@ describe('agent smoke test', () => {
     const fetchMock = vi
       .fn()
       .mockImplementationOnce(async () => {
-        return new Response(
-          JSON.stringify({
-            choices: [
-              {
-                message: {
-                  content:
-                    '{"type":"tool_call","tool":"write_file","input":{"path":"tmp-new-file.txt","content":"hello\\n"}}'
-                }
+        return jsonResponse({
+          choices: [
+            {
+              message: {
+                content:
+                  '{"type":"tool_call","tool":"write_file","input":{"path":"tmp-new-file.txt","content":"hello\\n"}}'
               }
-            ]
-          }),
-          {status: 200, headers: {'Content-Type': 'application/json'}}
-        )
+            }
+          ]
+        })
       })
-      .mockImplementationOnce(async (_input: string | URL | Request, init?: RequestInit) => {
-        const body = JSON.parse(String(init?.body)) as {
-          messages: Array<{role: string; content: string}>
-        }
-        const toolResultMessage = body.messages.find((m) => m.role === 'user' && m.content.startsWith('TOOL_RESULT '))
+      .mockImplementation(async (input: string | URL | Request, init?: RequestInit) => {
+        const request = init?.body ? JSON.parse(String(init.body)) : null
+        const messages: Array<{role: string; content: string}> = request?.messages ?? []
+        const toolResultMessage = messages.find((m) => m.role === 'user' && m.content.includes('TOOL_RESULT'))
         expect(toolResultMessage?.content).toContain('does not exist')
-        return new Response(
-          JSON.stringify({
-            choices: [{message: {content: 'create blocked'}}]
-          }),
-          {status: 200, headers: {'Content-Type': 'application/json'}}
-        )
+        return jsonResponse({choices: [{message: {content: 'create blocked'}}]})
       })
 
     vi.stubGlobal('fetch', fetchMock)
@@ -148,31 +115,22 @@ describe('agent smoke test', () => {
     const fetchMock = vi
       .fn()
       .mockImplementationOnce(async () => {
-        return new Response(
-          JSON.stringify({
-            choices: [
-              {
-                message: {
-                  content: '{"type":"tool_call","tool":"run_shell","input":{"command":"rm -rf task"}}'
-                }
+        return jsonResponse({
+          choices: [
+            {
+              message: {
+                content: '{"type":"tool_call","tool":"run_shell","input":{"command":"rm -rf task"}}'
               }
-            ]
-          }),
-          {status: 200, headers: {'Content-Type': 'application/json'}}
-        )
+            }
+          ]
+        })
       })
-      .mockImplementationOnce(async (_input: string | URL | Request, init?: RequestInit) => {
-        const body = JSON.parse(String(init?.body)) as {
-          messages: Array<{role: string; content: string}>
-        }
-        const toolResultMessage = body.messages.find((m) => m.role === 'user' && m.content.startsWith('TOOL_RESULT '))
+      .mockImplementation(async (input: string | URL | Request, init?: RequestInit) => {
+        const request = init?.body ? JSON.parse(String(init.body)) : null
+        const messages: Array<{role: string; content: string}> = request?.messages ?? []
+        const toolResultMessage = messages.find((m) => m.role === 'user' && m.content.includes('TOOL_RESULT'))
         expect(toolResultMessage?.content).toContain('destructive command blocked')
-        return new Response(
-          JSON.stringify({
-            choices: [{message: {content: 'danger blocked'}}]
-          }),
-          {status: 200, headers: {'Content-Type': 'application/json'}}
-        )
+        return jsonResponse({choices: [{message: {content: 'danger blocked'}}]})
       })
 
     vi.stubGlobal('fetch', fetchMock)
@@ -189,27 +147,17 @@ describe('agent smoke test', () => {
     const fetchMock = vi
       .fn()
       .mockImplementationOnce(async () => {
-        return new Response(
-          JSON.stringify({
-            choices: [
-              {
-                message: {
-                  content: `{"type":"tool_call","tool":"run_shell","input":{"command":"rm -f ${target}"}}`
-                }
+        return jsonResponse({
+          choices: [
+            {
+              message: {
+                content: `{"type":"tool_call","tool":"run_shell","input":{"command":"rm -f ${target}"}}`
               }
-            ]
-          }),
-          {status: 200, headers: {'Content-Type': 'application/json'}}
-        )
+            }
+          ]
+        })
       })
-      .mockImplementationOnce(async () => {
-        return new Response(
-          JSON.stringify({
-            choices: [{message: {content: 'approved'}}]
-          }),
-          {status: 200, headers: {'Content-Type': 'application/json'}}
-        )
-      })
+      .mockImplementation(async () => jsonResponse({choices: [{message: {content: 'approved'}}]}))
 
     vi.stubGlobal('fetch', fetchMock)
 

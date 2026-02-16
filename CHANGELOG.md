@@ -1,5 +1,18 @@
 # Changelog
 
+## v0.2.0 - 2026-02-16
+
+### Added
+- Event-loop runtime with explicit message roles: `system/user/assistant/tool`.
+- In-memory session store with turn-based APIs (`createAgentSession`, `runAgentTurn`, `closeAgentSession`).
+- Interactive `chat` command backed by the same runtime loop.
+- Sliding-context strategy: system prompt + latest 20 messages per model request.
+
+### Changed
+- Removed SQLite-native dependency path for now; session state is memory-held.
+- Tool results now flow back as `tool` role messages in runtime state.
+- Kept sensitive shell approvals and existing mutation safety rules.
+
 ## v0.1.1 - 2026-02-16
 
 ### Added

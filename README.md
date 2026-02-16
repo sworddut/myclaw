@@ -10,7 +10,7 @@ A CLI coding agent scaffold (TypeScript + oclif).
 - execa (tool execution)
 - cosmiconfig + dotenv (config)
 - zod (schema)
-- better-sqlite3 (storage, reserved for next step)
+- in-memory session store (v0.2.0 baseline)
 - vitest (tests)
 
 ## Quick start
@@ -60,9 +60,15 @@ node ./bin/run.js run --nonInteractive "implement hello world"
 # Init local config files
 node ./bin/run.js init
 
-# Scaffolded chat mode
+# Interactive chat mode
 node ./bin/run.js chat
 ```
+
+## Message Model
+
+- Roles: `system`, `user`, `assistant`, `tool`
+- Runtime: event-loop turn processing with tool execution feedback
+- Context policy: system prompt + sliding window of recent 20 messages
 
 File mutation safety rules:
 - Existing files must be `read_file` before `write_file`/`apply_patch`.
@@ -84,10 +90,10 @@ src/config/         # config loader + schema
 test/               # tests
 ```
 
-## Known Limitations (v0.1-alpha)
+## Known Limitations (v0.2.0)
 
 - Tool-calling protocol is JSON-in-text parsing, not native function-calling.
-- No persistent conversation/session memory yet.
+- Session memory is in-process only (no persistent storage yet).
 - No git-aware safety flow (branching, checkpoint, rollback) yet.
 - Network/API retries and timeout policies are still basic.
 - Permission model is coarse-grained; no per-tool policy profile yet.

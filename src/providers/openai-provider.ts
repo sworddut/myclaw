@@ -1,5 +1,6 @@
 import OpenAI from 'openai'
 import type {ChatMessage, LLMProvider} from './types.js'
+import type {ChatCompletionMessageParam} from 'openai/resources/chat/completions'
 
 type OpenAIProviderOptions = {
   apiKey: string
@@ -61,9 +62,23 @@ export class OpenAIProvider implements LLMProvider {
   }
 
   async chat(messages: ChatMessage[]): Promise<string> {
+    const mappedMessages: ChatCompletionMessageParam[] = messages.map((message) => {
+      if (message.role === 'tool') {
+        return {
+          role: 'user',
+          content: `[tool] ${message.content}`
+        }
+      }
+
+      return {
+        role: message.role,
+        content: message.content
+      }
+    })
+
     const completion = await this.client.chat.completions.create({
       model: this.model,
-      messages
+      messages: mappedMessages
     })
     const content = extractText(completion)
 

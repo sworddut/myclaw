@@ -11,6 +11,9 @@ import {
   writeTextFile
 } from '../tools/filesystem.js'
 import {runShell} from '../tools/shell.js'
+import {AgentSession, InMemorySessionStore} from './session-store.js'
+
+const sessionStore = new InMemorySessionStore()
 
 function nonEmpty(value?: string): string | undefined {
   if (!value) return undefined
@@ -49,7 +52,7 @@ type ToolCall = {
 }
 
 export type AgentEvent =
-  | {type: 'start'; provider: string; model: string; workspace: string}
+  | {type: 'start'; provider: string; model: string; workspace: string; sessionId: string}
   | {type: 'model_response'; step: number; content: string}
   | {type: 'tool_call'; step: number; tool: ToolName; input: Record<string, unknown>}
   | {type: 'tool_result'; step: number; tool: ToolName; ok: boolean; output: string}
@@ -59,11 +62,8 @@ export type AgentEvent =
 type AgentRunOptions = {
   onEvent?: (event: AgentEvent) => void
   maxSteps?: number
+  contextWindowSize?: number
   onSensitiveAction?: (request: {tool: ToolName; command: string}) => Promise<boolean> | boolean
-}
-
-type ExecutionState = {
-  readPaths: Set<string>
 }
 
 function extractJsonBlock(text: string): string | undefined {
@@ -149,7 +149,7 @@ function mutationCount(calls: ToolCall[]): number {
 }
 
 function readBeforeWriteError(tool: ToolName, path: string): string {
-  return `${tool} rejected: existing file '${path}' must be read_file first in this run.`
+  return `${tool} rejected: existing file '${path}' must be read_file first in this session.`
 }
 
 function createFileRejectedError(path: string): string {
@@ -167,7 +167,7 @@ function looksDestructiveCommand(command: string): boolean {
     /\brmdir\b/,
     /\bunlink\b/,
     /\bdel\b/,
-    /\brd\b/, // windows remove directory shorthand can appear in scripts
+    /\brd\b/,
     /\bmv\b.+\s\/dev\/null/,
     /\bgit\s+reset\s+--hard\b/,
     /\bgit\s+clean\b/
@@ -177,16 +177,15 @@ function looksDestructiveCommand(command: string): boolean {
 
 async function executeTool(
   toolCall: ToolCall,
-  workspace: string,
-  state: ExecutionState,
+  session: AgentSession,
   options: AgentRunOptions
 ): Promise<{ok: boolean; output: string}> {
   try {
     switch (toolCall.tool) {
       case 'read_file': {
         const path = String(toolCall.input.path ?? '')
-        const content = await readTextFile(workspace, path)
-        state.readPaths.add(resolveWorkspacePath(workspace, path))
+        const content = await readTextFile(session.workspace, path)
+        session.readPaths.add(resolveWorkspacePath(session.workspace, path))
         return {ok: true, output: content}
       }
 
@@ -194,16 +193,16 @@ async function executeTool(
         const path = String(toolCall.input.path ?? '')
         const content = String(toolCall.input.content ?? '')
         const allowCreate = Boolean(toolCall.input.allowCreate ?? false)
-        const existing = await fileExists(workspace, path)
-        const canonicalPath = resolveWorkspacePath(workspace, path)
+        const existing = await fileExists(session.workspace, path)
+        const canonicalPath = resolveWorkspacePath(session.workspace, path)
         if (!existing && !allowCreate) {
           return {ok: false, output: createFileRejectedError(path)}
         }
-        if (existing && !state.readPaths.has(canonicalPath)) {
+        if (existing && !session.readPaths.has(canonicalPath)) {
           return {ok: false, output: readBeforeWriteError('write_file', path)}
         }
-        await writeTextFile(workspace, path, content)
-        state.readPaths.add(canonicalPath)
+        await writeTextFile(session.workspace, path, content)
+        session.readPaths.add(canonicalPath)
         return {ok: true, output: `Wrote file: ${path}`}
       }
 
@@ -212,23 +211,23 @@ async function executeTool(
         const search = String(toolCall.input.search ?? '')
         const replace = String(toolCall.input.replace ?? '')
         const replaceAll = Boolean(toolCall.input.replaceAll ?? false)
-        const existing = await fileExists(workspace, path)
-        const canonicalPath = resolveWorkspacePath(workspace, path)
+        const existing = await fileExists(session.workspace, path)
+        const canonicalPath = resolveWorkspacePath(session.workspace, path)
         if (!existing) {
           return {ok: false, output: `apply_patch rejected: '${path}' does not exist.`}
         }
-        if (existing && !state.readPaths.has(canonicalPath)) {
+        if (!session.readPaths.has(canonicalPath)) {
           return {ok: false, output: readBeforeWriteError('apply_patch', path)}
         }
 
-        const output = await applyTextPatch(workspace, path, search, replace, replaceAll)
-        state.readPaths.add(canonicalPath)
+        const output = await applyTextPatch(session.workspace, path, search, replace, replaceAll)
+        session.readPaths.add(canonicalPath)
         return {ok: true, output}
       }
 
       case 'list_files': {
         const path = String(toolCall.input.path ?? '.')
-        const files = await listFiles(workspace, path)
+        const files = await listFiles(session.workspace, path)
         return {ok: true, output: files.join('\n') || '(empty directory)'}
       }
 
@@ -240,7 +239,7 @@ async function executeTool(
             return {ok: false, output: shellDangerRejectedError(command)}
           }
         }
-        const output = await runShell(command, workspace)
+        const output = await runShell(command, session.workspace)
         return {ok: true, output}
       }
 
@@ -253,70 +252,96 @@ async function executeTool(
   }
 }
 
-export async function runAgentTask(task: string, options: AgentRunOptions = {}): Promise<string> {
+function buildSystemPrompt(workspace: string): string {
+  return [
+    `You are a coding agent running in workspace: ${workspace}.`,
+    'When you need to operate files or shell, respond with ONLY JSON:',
+    '{"type":"tool_call","tool":"read_file|write_file|apply_patch|list_files|run_shell","input":{...}}',
+    'Available tools:',
+    '- read_file: {"path":"relative/path"}',
+    '- write_file: {"path":"relative/path","content":"...","allowCreate":false} (single-file full rewrite)',
+    '- apply_patch: {"path":"relative/path","search":"old text","replace":"new text","replaceAll":false}',
+    '- list_files: {"path":"relative/path optional"}',
+    '- run_shell: {"command":"..."}',
+    'Rules:',
+    '- Existing files MUST be read_file before write_file/apply_patch.',
+    '- New file creation is blocked by default.',
+    '- To create files, write_file input.allowCreate=true is required.',
+    '- Destructive shell commands (e.g., rm/rmdir/unlink/del/git reset --hard/git clean) are sensitive and need approval.',
+    '- You may call multiple read_file tools in one response.',
+    '- At most one mutation tool (write_file or apply_patch) per response.',
+    'Use relative paths. Never wrap JSON with extra prose when calling tools.',
+    'When finished, return a normal natural-language summary.'
+  ].join('\n')
+}
+
+function buildContext(messages: ChatMessage[], windowSize: number): ChatMessage[] {
+  const systemMessage = messages.find((message) => message.role === 'system')
+  const nonSystem = messages.filter((message) => message.role !== 'system')
+  const recent = nonSystem.slice(-windowSize)
+  return systemMessage ? [systemMessage, ...recent] : recent
+}
+
+export async function createAgentSession(options: AgentRunOptions = {}): Promise<string> {
   const config = await loadConfig()
   const resolvedModel = resolveModel(config.model)
   const provider = providerFromConfig(config.provider, resolvedModel, config.baseURL)
   const workspace = config.workspace
-  const maxSteps = options.maxSteps ?? 8
+  const systemPrompt = buildSystemPrompt(workspace)
+
+  const created = sessionStore.create({
+    provider,
+    workspace,
+    readPaths: new Set<string>(),
+    messages: [{role: 'system', content: systemPrompt}]
+  })
 
   options.onEvent?.({
     type: 'start',
     provider: config.provider,
     model: resolvedModel,
-    workspace
+    workspace,
+    sessionId: created.id
   })
 
-  const messages: ChatMessage[] = [
-    {
-      role: 'system' as const,
-      content: [
-        `You are a coding agent running in workspace: ${workspace}.`,
-        'When you need to operate files or shell, respond with ONLY JSON:',
-        '{"type":"tool_call","tool":"read_file|write_file|apply_patch|list_files|run_shell","input":{...}}',
-        'Available tools:',
-        '- read_file: {"path":"relative/path"}',
-        '- write_file: {"path":"relative/path","content":"...","allowCreate":false} (single-file full rewrite)',
-        '- apply_patch: {"path":"relative/path","search":"old text","replace":"new text","replaceAll":false}',
-        '- list_files: {"path":"relative/path optional"}',
-        '- run_shell: {"command":"..."}',
-        'Rules:',
-        '- Existing files MUST be read_file before write_file/apply_patch.',
-        '- New file creation is blocked by default.',
-        '- To create files, write_file input.allowCreate=true is required.',
-        '- Destructive shell commands (e.g., rm/rmdir/unlink/del/git reset --hard/git clean) are blocked.',
-        '- You may call multiple read_file tools in one response.',
-        '- At most one mutation tool (write_file or apply_patch) per response.',
-        'Use relative paths. Never wrap JSON with extra prose when calling tools.',
-        'When finished, return a normal natural-language summary.'
-      ].join('\n')
-    },
-    {role: 'user' as const, content: task}
-  ]
-  const state: ExecutionState = {readPaths: new Set<string>()}
+  return created.id
+}
+
+export async function runAgentTurn(
+  sessionId: string,
+  userMessage: string,
+  options: AgentRunOptions = {}
+): Promise<string> {
+  const session = sessionStore.get(sessionId)
+  const maxSteps = options.maxSteps ?? 8
+  const contextWindowSize = options.contextWindowSize ?? 20
+
+  session.messages.push({role: 'user', content: userMessage})
 
   for (let step = 0; step < maxSteps; step += 1) {
-    const assistantText = await provider.chat(messages)
+    const context = buildContext(session.messages, contextWindowSize)
+    const assistantText = await session.provider.chat(context)
     options.onEvent?.({type: 'model_response', step, content: assistantText})
-    const toolCalls = parseToolCalls(assistantText)
+    session.messages.push({role: 'assistant', content: assistantText})
 
+    const toolCalls = parseToolCalls(assistantText)
     if (toolCalls.length === 0) {
       options.onEvent?.({type: 'final', step, content: assistantText})
       return assistantText
     }
 
-    messages.push({role: 'assistant', content: assistantText})
     if (mutationCount(toolCalls) > 1) {
       const output = 'Batch rejected: only one mutation tool (write_file/apply_patch) is allowed per step.'
+      const mutationTool = toolCalls.find((call) => call.tool === 'write_file' || call.tool === 'apply_patch')
       options.onEvent?.({
         type: 'tool_result',
         step,
-        tool: toolCalls.find((call) => call.tool === 'write_file' || call.tool === 'apply_patch')?.tool ?? 'write_file',
+        tool: mutationTool?.tool ?? 'write_file',
         ok: false,
         output
       })
-      messages.push({
-        role: 'user',
+      session.messages.push({
+        role: 'tool',
         content: `TOOL_RESULT ${JSON.stringify({tool: 'batch_validation', ok: false, output})}`
       })
       continue
@@ -324,7 +349,7 @@ export async function runAgentTask(task: string, options: AgentRunOptions = {}):
 
     for (const toolCall of toolCalls) {
       options.onEvent?.({type: 'tool_call', step, tool: toolCall.tool, input: toolCall.input})
-      const result = await executeTool(toolCall, workspace, state, options)
+      const result = await executeTool(toolCall, session, options)
       options.onEvent?.({
         type: 'tool_result',
         step,
@@ -332,8 +357,8 @@ export async function runAgentTask(task: string, options: AgentRunOptions = {}):
         ok: result.ok,
         output: result.output
       })
-      messages.push({
-        role: 'user',
+      session.messages.push({
+        role: 'tool',
         content: `TOOL_RESULT ${JSON.stringify({tool: toolCall.tool, ...result})}`
       })
     }
@@ -341,4 +366,17 @@ export async function runAgentTask(task: string, options: AgentRunOptions = {}):
 
   options.onEvent?.({type: 'max_steps', step: maxSteps})
   return 'Stopped after maximum tool steps. Please refine the task and retry.'
+}
+
+export function closeAgentSession(sessionId: string): void {
+  sessionStore.delete(sessionId)
+}
+
+export async function runAgentTask(task: string, options: AgentRunOptions = {}): Promise<string> {
+  const sessionId = await createAgentSession(options)
+  try {
+    return await runAgentTurn(sessionId, task, options)
+  } finally {
+    closeAgentSession(sessionId)
+  }
 }
