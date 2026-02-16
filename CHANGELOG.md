@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.2.1 - 2026-02-16
+
+### Changed
+- Shell execution now selects runtime shell dynamically (`$SHELL`, Windows `ComSpec`, or system default) instead of hardcoding `zsh`.
+- `run_shell` now includes `exit_code` even when command output is empty.
+
 ## v0.2.0 - 2026-02-16
 
 ### Added
