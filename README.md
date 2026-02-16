@@ -2,6 +2,8 @@
 
 A CLI coding agent scaffold (TypeScript + oclif).
 
+See `QUICK_START.md` for a 5-minute setup guide.
+
 ## Tech stack
 
 - Node.js 20+
