@@ -3,6 +3,14 @@
   "version": "0.2.2",
   "private": false,
   "description": "A CLI coding agent inspired by Claude Code",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/sworddut/myclaw"
+  },
+  "homepage": "https://github.com/sworddut/myclaw",
+  "bugs": {
+    "url": "https://github.com/sworddut/myclaw/issues"
+  },
   "type": "module",
   "bin": {
     "myclaw": "bin/run.js"
