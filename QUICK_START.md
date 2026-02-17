@@ -26,6 +26,7 @@ This creates global home files (default):
 
 - `~/.myclaw/.env.example`
 - `~/.myclaw/memory.md`
+- `~/.myclaw/sessions/<session-id>.jsonl` (created during runs/chats)
 
 You can override home with:
 
@@ -63,9 +64,12 @@ Interactive mode:
 
 ```bash
 myclaw chat
+# or resume latest session in current workspace
+myclaw chat --resume latest
 ```
 
 Type `/exit` to quit chat.
+Type `/help` to see chat commands (`/clear`, `/history`, `/config`, `/sessions`, `/use`).
 
 ## 5) Useful Flags
 
@@ -78,6 +82,9 @@ myclaw run --quiet "..."
 
 # disable sensitive-command interactive approval
 myclaw run --nonInteractive "..."
+
+# show timing debug info
+myclaw run --debug "..."
 ```
 
 ## 6) Safety Behavior (Important)
@@ -91,6 +98,7 @@ myclaw run --nonInteractive "..."
 
 ```bash
 myclaw config
+myclaw doctor
 ```
 
 ## 8) Troubleshooting

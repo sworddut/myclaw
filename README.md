@@ -33,6 +33,7 @@ Model priority: `.myclawrc.json` `model` > `OPENAI_MODEL` > `gpt-4o-mini`.
 - Override with env: `MYCLAW_HOME=/custom/path`
 - Global env file: `~/.myclaw/.env`
 - Memory file: `~/.myclaw/memory.md`
+- Session logs: `~/.myclaw/sessions/<session-id>.jsonl`
 
 Create your global env:
 
@@ -56,14 +57,24 @@ node ./bin/run.js run --quiet "implement hello world"
 # Show raw model responses for each step (debug)
 node ./bin/run.js run --verboseModel "implement hello world"
 
+# Show per-event timing debug data
+node ./bin/run.js run --debug "implement hello world"
+
 # Disable interactive approval prompts (sensitive commands auto-denied)
 node ./bin/run.js run --nonInteractive "implement hello world"
 
-# Init local config files
-node ./bin/run.js init
-
 # Interactive chat mode
 node ./bin/run.js chat
+
+# Resume latest session for current workspace
+node ./bin/run.js chat --resume latest
+
+# Runtime diagnostics
+node ./bin/run.js doctor
+node ./bin/run.js doctor --json
+
+# Init local config files
+node ./bin/run.js init
 ```
 
 ## Message Model
@@ -72,11 +83,21 @@ node ./bin/run.js chat
 - Runtime: event-loop turn processing with tool execution feedback
 - Context policy: system prompt + sliding window of recent 20 messages
 
+Chat slash commands:
+- `/help`
+- `/exit` / `/quit`
+- `/clear`
+- `/history [n]`
+- `/config`
+- `/sessions [n]`
+- `/use <id|index|latest>`
+
 File mutation safety rules:
 - Existing files must be `read_file` before `write_file`/`apply_patch`.
 - New file creation is blocked by default. Use `write_file` with `allowCreate=true` only when explicitly needed.
 - Destructive shell commands (for example `rm`, `rmdir`, `unlink`, `del`, `git reset --hard`, `git clean`) are treated as sensitive.
 - Sensitive shell commands require interactive approval (`WAITING FOR USER INPUT`), otherwise they are denied.
+- File discovery is supported with `search_workspace` before `read_file`.
 - Multiple reads are allowed in one step.
 - Only one mutation (`write_file` or `apply_patch`) is allowed per step.
 
@@ -108,3 +129,19 @@ test/               # tests
 - Add path allowlist/denylist policy with per-tool enforcement.
 - Add native tool/function-calling mode when provider supports it.
 - Add E2E regression tests for multi-file debug scenarios.
+
+## Release Automation
+
+GitHub Actions workflows are included:
+- `.github/workflows/ci.yml`: build + test on push/PR
+- `.github/workflows/release.yml`: publish npm + create GitHub Release on `v*` tags
+
+Required repository secret:
+- `NPM_TOKEN`: npm granular access token with publish permission for `@sworddut/myclaw`
+
+Release command sequence:
+
+```bash
+npm version patch
+git push origin main --follow-tags
+```

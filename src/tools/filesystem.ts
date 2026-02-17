@@ -1,5 +1,5 @@
-import {mkdir, readFile, readdir, writeFile} from 'node:fs/promises'
-import {dirname, resolve, sep} from 'node:path'
+import {mkdir, opendir, readFile, readdir, writeFile} from 'node:fs/promises'
+import {dirname, relative, resolve, sep} from 'node:path'
 import {access, constants} from 'node:fs'
 
 function assertInsideWorkspace(workspace: string, inputPath: string): string {
@@ -40,6 +40,32 @@ export async function writeTextFile(workspace: string, path: string, content: st
 export async function listFiles(workspace: string, path = '.'): Promise<string[]> {
   const fullPath = assertInsideWorkspace(workspace, path)
   return readdir(fullPath)
+}
+
+export async function searchWorkspaceFiles(workspace: string, query: string, path = '.'): Promise<string[]> {
+  const q = query.trim().toLowerCase()
+  if (!q) return []
+
+  const root = assertInsideWorkspace(workspace, path)
+  const workspaceRoot = resolve(workspace)
+  const results: string[] = []
+
+  async function walk(dirPath: string): Promise<void> {
+    const dir = await opendir(dirPath)
+    for await (const entry of dir) {
+      const fullPath = resolve(dirPath, entry.name)
+      const relPath = relative(workspaceRoot, fullPath)
+      if (entry.name.toLowerCase().includes(q) || relPath.toLowerCase().includes(q)) {
+        results.push(relPath)
+      }
+      if (entry.isDirectory()) {
+        await walk(fullPath)
+      }
+    }
+  }
+
+  await walk(root)
+  return results.slice(0, 200)
 }
 
 export async function applyTextPatch(

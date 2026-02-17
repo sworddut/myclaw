@@ -26,10 +26,10 @@ function shorten(text: string, max = 500): string {
   return `${text.slice(0, max)}\n...[truncated]`
 }
 
-function formatEvent(event: AgentEvent): string {
+function baseEventLine(event: AgentEvent): string {
   switch (event.type) {
     case 'start':
-      return `[${now()}] START provider=${event.provider} model=${event.model} workspace=${event.workspace}`
+      return `[${now()}] START provider=${event.provider} model=${event.model} workspace=${event.workspace} session=${event.sessionId}`
     case 'model_response':
       return `[${now()}] MODEL_RESPONSE step=${event.step}\n${shorten(event.content)}`
     case 'tool_call':
@@ -49,7 +49,8 @@ export default class Run extends Command {
   static override flags = {
     quiet: Flags.boolean({description: 'hide execution logs and print only final output'}),
     verboseModel: Flags.boolean({description: 'show raw model responses for each step'}),
-    nonInteractive: Flags.boolean({description: 'disable interactive approval for sensitive commands'})
+    nonInteractive: Flags.boolean({description: 'disable interactive approval for sensitive commands'}),
+    debug: Flags.boolean({description: 'show timing debug info'})
   }
 
   static override args = {
@@ -58,12 +59,13 @@ export default class Run extends Command {
 
   public async run(): Promise<void> {
     const {args, flags} = await this.parse(Run)
+    const startedAt = Date.now()
+    let lastEventAt = startedAt
+
     const output = await runAgentTask(args.task, {
       onSensitiveAction: async ({tool, command}) => {
         if (flags.nonInteractive || !stdIn.isTTY) {
-          this.log(
-            red(`[${now()}] ⚠️ SENSITIVE_REQUEST tool=${tool} auto=deny (non-interactive) command=${command}`)
-          )
+          this.log(red(`[${now()}] ⚠️ SENSITIVE_REQUEST tool=${tool} auto=deny (non-interactive) command=${command}`))
           return false
         }
 
@@ -84,9 +86,20 @@ export default class Run extends Command {
         : (event) => {
             if (event.type === 'model_response' && !flags.verboseModel) return
             if (event.type === 'final') return
-            this.log(formatEvent(event))
+            const base = baseEventLine(event)
+            if (!flags.debug) {
+              this.log(base)
+              return
+            }
+
+            const nowAt = Date.now()
+            const totalMs = nowAt - startedAt
+            const deltaMs = nowAt - lastEventAt
+            lastEventAt = nowAt
+            this.log(`[debug +${deltaMs}ms total=${totalMs}ms] ${base}`)
           }
     })
+
     this.log(output)
   }
 }

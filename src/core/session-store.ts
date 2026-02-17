@@ -1,11 +1,21 @@
 import {randomUUID} from 'node:crypto'
 import type {ChatMessage, LLMProvider} from '../providers/types.js'
 
+export type SessionSummaryBlock = {
+  ts: string
+  from: number
+  to: number
+  content: string
+}
+
 export type AgentSession = {
   id: string
   provider: LLMProvider
   workspace: string
+  logPath?: string
   messages: ChatMessage[]
+  summaries: SessionSummaryBlock[]
+  compressedCount: number
   readPaths: Set<string>
 }
 
@@ -22,6 +32,15 @@ export class InMemorySessionStore {
   get(sessionId: string): AgentSession {
     const session = this.sessions.get(sessionId)
     if (!session) throw new Error(`Session not found: ${sessionId}`)
+    return session
+  }
+
+  has(sessionId: string): boolean {
+    return this.sessions.has(sessionId)
+  }
+
+  restore(session: AgentSession): AgentSession {
+    this.sessions.set(session.id, session)
     return session
   }
 

@@ -1,7 +1,31 @@
 import {Command, Flags} from '@oclif/core'
 import {createInterface} from 'node:readline/promises'
 import {stdin as stdIn, stdout as stdOut} from 'node:process'
-import {closeAgentSession, createAgentSession, runAgentTurn, type AgentEvent} from '../core/agent.js'
+import {loadConfig} from '../config/load-config.js'
+import {
+  closeAgentSession,
+  createAgentSession,
+  getAgentSessionMessages,
+  getAgentSessionSummaries,
+  listPersistedSessionsForWorkspace,
+  resumeAgentSession,
+  runAgentTurn,
+  type AgentEvent,
+  type PersistedSessionSummary
+} from '../core/agent.js'
+
+const CHAT_COMMANDS = [
+  '/help',
+  '/exit',
+  '/quit',
+  '/clear',
+  '/history',
+  '/config',
+  '/session',
+  '/summary',
+  '/sessions',
+  '/use'
+]
 
 const ANSI = {
   reset: '\x1b[0m',
@@ -31,7 +55,7 @@ function shorten(text: string, max = 500): string {
   return `${text.slice(0, max)}\n...[truncated]`
 }
 
-function formatEvent(event: AgentEvent): string {
+function baseEventLine(event: AgentEvent): string {
   switch (event.type) {
     case 'start':
       return `[${now()}] START provider=${event.provider} model=${event.model} workspace=${event.workspace} session=${event.sessionId}`
@@ -48,44 +72,214 @@ function formatEvent(event: AgentEvent): string {
   }
 }
 
+function printHelp(log: (line: string) => void): void {
+  log(cyan('chat commands:'))
+  log(cyan('  /help                    show this help'))
+  log(cyan('  /exit or /quit           exit chat'))
+  log(cyan('  /clear                   clear current session history'))
+  log(cyan('  /history [n]             show recent non-system messages (default 20)'))
+  log(cyan('  /config                  print resolved config'))
+  log(cyan('  /session                 show current session id and message count'))
+  log(cyan('  /summary [n]             show recent summary blocks (default 3)'))
+  log(cyan('  /sessions [n]            list recent sessions for current workspace'))
+  log(cyan('  /use <id|index|latest>   switch to a persisted session'))
+}
+
+function createCompleter() {
+  return (line: string): [string[], string] => {
+    if (!line.startsWith('/')) return [[], line]
+    const hits = CHAT_COMMANDS.filter((command) => command.startsWith(line))
+    return [hits.length > 0 ? hits : CHAT_COMMANDS, line]
+  }
+}
+
+function pickSession(
+  summaries: PersistedSessionSummary[],
+  specifier: string
+): PersistedSessionSummary | undefined {
+  if (specifier === 'latest') return summaries[0]
+  const numeric = Number.parseInt(specifier, 10)
+  if (Number.isFinite(numeric) && numeric >= 1 && numeric <= summaries.length) {
+    return summaries[numeric - 1]
+  }
+  return summaries.find((item) => item.sessionId === specifier)
+}
+
 export default class Chat extends Command {
   static override description = 'Interactive chat mode with in-memory session loop'
 
   static override flags = {
     quiet: Flags.boolean({description: 'hide execution logs and show only assistant responses'}),
     verboseModel: Flags.boolean({description: 'show raw model responses for each step'}),
-    nonInteractive: Flags.boolean({description: 'disable interactive approval for sensitive commands'})
+    nonInteractive: Flags.boolean({description: 'disable interactive approval for sensitive commands'}),
+    debug: Flags.boolean({description: 'show timing debug info'}),
+    resume: Flags.string({description: 'resume from session id or latest'})
   }
 
   public async run(): Promise<void> {
     const {flags} = await this.parse(Chat)
-    const rl = createInterface({input: stdIn, output: stdOut})
+    const rl = createInterface({input: stdIn, output: stdOut, completer: createCompleter()})
     let sessionId = ''
+    const startedAt = Date.now()
+    let lastEventAt = startedAt
+
+    const onEvent = flags.quiet
+      ? undefined
+      : (event: AgentEvent) => {
+          if (event.type === 'model_response' && !flags.verboseModel) return
+          if (event.type === 'final') return
+          const base = baseEventLine(event)
+          if (!flags.debug) {
+            this.log(base)
+            return
+          }
+
+          const nowAt = Date.now()
+          const totalMs = nowAt - startedAt
+          const deltaMs = nowAt - lastEventAt
+          lastEventAt = nowAt
+          this.log(`[debug +${deltaMs}ms total=${totalMs}ms] ${base}`)
+        }
 
     try {
-      sessionId = await createAgentSession({
-        onEvent: flags.quiet
-          ? undefined
-          : (event) => {
-              if (event.type === 'model_response' && !flags.verboseModel) return
-              if (event.type === 'final') return
-              this.log(formatEvent(event))
-            }
-      })
+      if (flags.resume) {
+        const workspace = (await loadConfig()).workspace
+        const summaries = await listPersistedSessionsForWorkspace(workspace)
+        const target = pickSession(summaries, flags.resume)
+        if (!target) {
+          this.log(red(`No session found for --resume ${flags.resume}`))
+          sessionId = await createAgentSession({onEvent})
+        } else {
+          sessionId = await resumeAgentSession(target.sessionId, {onEvent})
+          this.log(cyan(`resumed session: ${target.sessionId}`))
+        }
+      } else {
+        sessionId = await createAgentSession({onEvent})
+      }
 
-      this.log(cyan('myclaw chat started. Type /exit to quit.'))
+      this.log(cyan('myclaw chat started. Type /help for commands.'))
 
       while (true) {
-        const input = (await rl.question(cyan('you> '))).trim()
+        let input = ''
+        try {
+          input = (await rl.question(cyan('you> '))).trim()
+        } catch {
+          this.log(cyan('\nInterrupted. Type /exit to quit.'))
+          continue
+        }
+
         if (!input) continue
         if (input === '/exit' || input === '/quit') break
+
+        if (input === '/help') {
+          printHelp((line) => this.log(line))
+          continue
+        }
+
+        if (input === '/clear') {
+          closeAgentSession(sessionId)
+          sessionId = await createAgentSession({onEvent})
+          this.log(cyan('session cleared'))
+          continue
+        }
+
+        if (input.startsWith('/history')) {
+          const maybeCount = Number.parseInt(input.split(/\s+/)[1] ?? '20', 10)
+          const count = Number.isFinite(maybeCount) && maybeCount > 0 ? maybeCount : 20
+          const messages = getAgentSessionMessages(sessionId)
+            .filter((message) => message.role !== 'system')
+            .slice(-count)
+          if (messages.length === 0) {
+            this.log(cyan('(history empty)'))
+            continue
+          }
+
+          for (const message of messages) {
+            this.log(`${message.role}> ${shorten(message.content, 300)}`)
+          }
+          continue
+        }
+
+        if (input === '/config') {
+          const config = await loadConfig()
+          this.log(JSON.stringify(config, null, 2))
+          continue
+        }
+
+        if (input === '/session') {
+          const messages = getAgentSessionMessages(sessionId)
+          const nonSystem = messages.filter((message) => message.role !== 'system').length
+          this.log(cyan(`session: ${sessionId} messages(non-system): ${nonSystem}`))
+          continue
+        }
+
+        if (input.startsWith('/summary')) {
+          const maybeCount = Number.parseInt(input.split(/\s+/)[1] ?? '3', 10)
+          const count = Number.isFinite(maybeCount) && maybeCount > 0 ? maybeCount : 3
+          const summaries = getAgentSessionSummaries(sessionId).slice(-count)
+          if (summaries.length === 0) {
+            this.log(cyan('(no summary blocks yet)'))
+            continue
+          }
+
+          summaries.forEach((summary, index) => {
+            this.log(cyan(`summary ${index + 1}: [${summary.from}-${summary.to}] ts=${summary.ts}`))
+            this.log(summary.content)
+          })
+          continue
+        }
+
+        if (input.startsWith('/sessions')) {
+          const maybeCount = Number.parseInt(input.split(/\s+/)[1] ?? '20', 10)
+          const count = Number.isFinite(maybeCount) && maybeCount > 0 ? maybeCount : 20
+          const workspace = (await loadConfig()).workspace
+          const summaries = (await listPersistedSessionsForWorkspace(workspace)).slice(0, count)
+          if (summaries.length === 0) {
+            this.log(cyan('(no persisted sessions for current workspace)'))
+            continue
+          }
+
+          summaries.forEach((summary, index) => {
+            this.log(
+              `${index + 1}. ${summary.sessionId} messages=${summary.messageCount} updated=${summary.lastUpdatedAt ?? summary.startedAt ?? 'unknown'}`
+            )
+          })
+          continue
+        }
+
+        if (input.startsWith('/use ')) {
+          const specifier = input.split(/\s+/)[1]
+          if (!specifier) {
+            this.log(red('usage: /use <id|index|latest>'))
+            continue
+          }
+
+          const workspace = (await loadConfig()).workspace
+          const summaries = await listPersistedSessionsForWorkspace(workspace)
+          const target = pickSession(summaries, specifier)
+          if (!target) {
+            this.log(red(`no session found for '${specifier}'`))
+            continue
+          }
+
+          if (sessionId !== target.sessionId) {
+            closeAgentSession(sessionId)
+            sessionId = await resumeAgentSession(target.sessionId, {onEvent})
+          }
+          this.log(cyan(`switched to session: ${target.sessionId}`))
+          continue
+        }
+
+        if (input.startsWith('/')) {
+          this.log(red(`unknown command: ${input}`))
+          this.log(cyan('type /help to see supported commands'))
+          continue
+        }
 
         const output = await runAgentTurn(sessionId, input, {
           onSensitiveAction: async ({tool, command}) => {
             if (flags.nonInteractive || !stdIn.isTTY) {
-              this.log(
-                red(`[${now()}] ⚠️ SENSITIVE_REQUEST tool=${tool} auto=deny (non-interactive) command=${command}`)
-              )
+              this.log(red(`[${now()}] ⚠️ SENSITIVE_REQUEST tool=${tool} auto=deny (non-interactive) command=${command}`))
               return false
             }
 
@@ -96,13 +290,7 @@ export default class Chat extends Command {
               .toLowerCase()
             return answer === 'y' || answer === 'yes'
           },
-          onEvent: flags.quiet
-            ? undefined
-            : (event) => {
-                if (event.type === 'model_response' && !flags.verboseModel) return
-                if (event.type === 'final') return
-                this.log(formatEvent(event))
-              }
+          onEvent
         })
 
         this.log(cyan('assistant>'))
