@@ -1,6 +1,6 @@
 {
   "name": "@sworddut/myclaw",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "private": false,
   "description": "A CLI coding agent inspired by Claude Code",
   "repository": {
