@@ -13,6 +13,9 @@ import {
   type AgentEvent,
   type PersistedSessionSummary
 } from '../core/agent.js'
+import {InMemoryEventBus} from '../core/event-bus.js'
+import {SessionLogSubscriber} from '../core/subscribers/session-log-subscriber.js'
+import {MetricsSubscriber} from '../core/subscribers/metrics-subscriber.js'
 
 const CHAT_COMMANDS = [
   '/help',
@@ -59,12 +62,22 @@ function baseEventLine(event: AgentEvent): string {
   switch (event.type) {
     case 'start':
       return `[${now()}] START provider=${event.provider} model=${event.model} workspace=${event.workspace} session=${event.sessionId}`
+    case 'session_resume':
+      return `[${now()}] SESSION_RESUME session=${event.sessionId}`
+    case 'session_end':
+      return `[${now()}] SESSION_END session=${event.sessionId}`
+    case 'message':
+      return `[${now()}] MESSAGE session=${event.sessionId} role=${event.role} step=${event.step ?? '-'}`
+    case 'summary':
+      return `[${now()}] SUMMARY session=${event.sessionId} range=[${event.from}-${event.to}]`
     case 'model_response':
       return `[${now()}] MODEL_RESPONSE step=${event.step}\n${shorten(event.content)}`
     case 'tool_call':
       return `[${now()}] TOOL_CALL step=${event.step} tool=${event.tool} input=${JSON.stringify(event.input)}`
     case 'tool_result':
       return `[${now()}] TOOL_RESULT step=${event.step} tool=${event.tool} ok=${event.ok}\n${shorten(event.output)}`
+    case 'oscillation_observe':
+      return `[${now()}] OSCILLATION_OBSERVE step=${event.step} window=${event.window} repeat_ratio=${event.repeatRatio} novelty_ratio=${event.noveltyRatio} no_mutation_steps=${event.noMutationSteps} possible=${event.possibleOscillation}`
     case 'final':
       return `[${now()}] FINAL step=${event.step}\n${shorten(event.content)}`
     case 'max_steps':
@@ -122,10 +135,27 @@ export default class Chat extends Command {
     let sessionId = ''
     const startedAt = Date.now()
     let lastEventAt = startedAt
+    const bus = new InMemoryEventBus<AgentEvent>()
+    const sessionLogSubscriber = new SessionLogSubscriber()
+    const metricsSubscriber = new MetricsSubscriber()
+    const unsubscribeLog = bus.subscribe((event) => {
+      void sessionLogSubscriber.handle(event)
+    })
+    const unsubscribeMetrics = bus.subscribe((event) => {
+      void metricsSubscriber.handle(event)
+    })
 
-    const onEvent = flags.quiet
-      ? undefined
-      : (event: AgentEvent) => {
+    const unsubscribe = flags.quiet
+      ? () => {}
+      : bus.subscribe((event: AgentEvent) => {
+          if (
+            event.type === 'message' ||
+            event.type === 'summary' ||
+            event.type === 'session_resume' ||
+            event.type === 'session_end'
+          ) {
+            return
+          }
           if (event.type === 'model_response' && !flags.verboseModel) return
           if (event.type === 'final') return
           const base = baseEventLine(event)
@@ -139,7 +169,7 @@ export default class Chat extends Command {
           const deltaMs = nowAt - lastEventAt
           lastEventAt = nowAt
           this.log(`[debug +${deltaMs}ms total=${totalMs}ms] ${base}`)
-        }
+        })
 
     try {
       if (flags.resume) {
@@ -148,13 +178,13 @@ export default class Chat extends Command {
         const target = pickSession(summaries, flags.resume)
         if (!target) {
           this.log(red(`No session found for --resume ${flags.resume}`))
-          sessionId = await createAgentSession({onEvent})
+          sessionId = await createAgentSession({bus})
         } else {
-          sessionId = await resumeAgentSession(target.sessionId, {onEvent})
+          sessionId = await resumeAgentSession(target.sessionId, {bus})
           this.log(cyan(`resumed session: ${target.sessionId}`))
         }
       } else {
-        sessionId = await createAgentSession({onEvent})
+        sessionId = await createAgentSession({bus})
       }
 
       this.log(cyan('myclaw chat started. Type /help for commands.'))
@@ -177,8 +207,8 @@ export default class Chat extends Command {
         }
 
         if (input === '/clear') {
-          closeAgentSession(sessionId)
-          sessionId = await createAgentSession({onEvent})
+          closeAgentSession(sessionId, {bus})
+          sessionId = await createAgentSession({bus})
           this.log(cyan('session cleared'))
           continue
         }
@@ -263,8 +293,8 @@ export default class Chat extends Command {
           }
 
           if (sessionId !== target.sessionId) {
-            closeAgentSession(sessionId)
-            sessionId = await resumeAgentSession(target.sessionId, {onEvent})
+            closeAgentSession(sessionId, {bus})
+            sessionId = await resumeAgentSession(target.sessionId, {bus})
           }
           this.log(cyan(`switched to session: ${target.sessionId}`))
           continue
@@ -277,6 +307,7 @@ export default class Chat extends Command {
         }
 
         const output = await runAgentTurn(sessionId, input, {
+          bus,
           onSensitiveAction: async ({tool, command}) => {
             if (flags.nonInteractive || !stdIn.isTTY) {
               this.log(red(`[${now()}] ⚠️ SENSITIVE_REQUEST tool=${tool} auto=deny (non-interactive) command=${command}`))
@@ -289,15 +320,17 @@ export default class Chat extends Command {
               .trim()
               .toLowerCase()
             return answer === 'y' || answer === 'yes'
-          },
-          onEvent
+          }
         })
 
         this.log(cyan('assistant>'))
         this.log(output)
       }
     } finally {
-      if (sessionId) closeAgentSession(sessionId)
+      unsubscribe()
+      unsubscribeLog()
+      unsubscribeMetrics()
+      if (sessionId) closeAgentSession(sessionId, {bus})
       rl.close()
     }
   }

@@ -22,3 +22,11 @@ export function getSessionsDir(homeDir = getMyclawHome()): string {
 export function getSessionLogPath(sessionId: string, homeDir = getMyclawHome()): string {
   return resolve(getSessionsDir(homeDir), `${sessionId}.jsonl`)
 }
+
+export function getMetricsDir(homeDir = getMyclawHome()): string {
+  return resolve(homeDir, 'metrics')
+}
+
+export function getMetricsLogPath(sessionId: string, homeDir = getMyclawHome()): string {
+  return resolve(getMetricsDir(homeDir), `${sessionId}.jsonl`)
+}

@@ -1,6 +1,16 @@
 import OpenAI from 'openai'
-import type {ChatMessage, LLMProvider} from './types.js'
-import type {ChatCompletionMessageParam} from 'openai/resources/chat/completions'
+import type {
+  ChatMessage,
+  LLMProvider,
+  ProviderResponse,
+  ProviderToolCall,
+  ProviderToolDefinition
+} from './types.js'
+import type {
+  ChatCompletionCreateParamsNonStreaming,
+  ChatCompletionMessageParam,
+  ChatCompletionTool
+} from 'openai/resources/chat/completions'
 
 type OpenAIProviderOptions = {
   apiKey: string
@@ -46,6 +56,39 @@ function extractText(data: any): string | undefined {
   return undefined
 }
 
+function parseToolCalls(data: any): ProviderToolCall[] {
+  const rawCalls = data?.choices?.[0]?.message?.tool_calls
+  if (!Array.isArray(rawCalls)) return []
+
+  const parsed: ProviderToolCall[] = []
+  for (const call of rawCalls) {
+    if (call?.type !== 'function') continue
+    const name = call?.function?.name
+    const rawArguments = call?.function?.arguments
+    if (typeof name !== 'string' || !name) continue
+
+    let input: Record<string, unknown> = {}
+    if (typeof rawArguments === 'string' && rawArguments.trim()) {
+      try {
+        const maybeObject = JSON.parse(rawArguments)
+        if (maybeObject && typeof maybeObject === 'object' && !Array.isArray(maybeObject)) {
+          input = maybeObject as Record<string, unknown>
+        }
+      } catch {
+        input = {}
+      }
+    }
+
+    parsed.push({
+      id: typeof call?.id === 'string' ? call.id : undefined,
+      name,
+      input
+    })
+  }
+
+  return parsed
+}
+
 export class OpenAIProvider implements LLMProvider {
   readonly name = 'openai'
   private readonly client: OpenAI
@@ -61,9 +104,19 @@ export class OpenAIProvider implements LLMProvider {
     })
   }
 
-  async chat(messages: ChatMessage[]): Promise<string> {
+  async chat(messages: ChatMessage[], tools: ProviderToolDefinition[] = []): Promise<ProviderResponse> {
     const mappedMessages: ChatCompletionMessageParam[] = messages.map((message) => {
       if (message.role === 'tool') {
+        if (message.toolCallId) {
+          return {
+            role: 'tool',
+            content: message.content,
+            tool_call_id: message.toolCallId,
+            // Some OpenAI-compatible backends (e.g. Gemini adapters) require function name on tool responses.
+            ...(message.toolName ? {name: message.toolName} : {})
+          } as ChatCompletionMessageParam
+        }
+
         return {
           role: 'user',
           content: `[tool] ${message.content}`
@@ -76,16 +129,42 @@ export class OpenAIProvider implements LLMProvider {
       }
     })
 
-    const completion = await this.client.chat.completions.create({
-      model: this.model,
-      messages: mappedMessages
-    })
-    const content = extractText(completion)
+    const mappedTools: ChatCompletionTool[] = tools.map((tool) => ({
+      type: 'function' as const,
+      function: {
+        name: tool.name,
+        description: tool.description,
+        parameters: tool.inputSchema
+      }
+    }))
 
-    if (!content) {
-      throw new Error(`OpenAI API returned no readable text. Response snippet: ${safeJsonSnippet(completion)}`)
+    const request: ChatCompletionCreateParamsNonStreaming = {
+      model: this.model,
+      messages: mappedMessages,
+      ...(mappedTools.length > 0 ? {tools: mappedTools, tool_choice: 'auto' as const} : {})
     }
 
-    return content
+    let completion = await this.client.chat.completions.create(request)
+    let content = extractText(completion)
+    let toolCalls = parseToolCalls(completion)
+
+    // Some OpenAI-compatible gateways may intermittently return choices: [].
+    if (!content && toolCalls.length === 0) {
+      completion = await this.client.chat.completions.create(request)
+      content = extractText(completion)
+      toolCalls = parseToolCalls(completion)
+    }
+
+    if (!content && toolCalls.length === 0) {
+      return {
+        text: 'Model returned an empty response after tool execution. No further action required.',
+        toolCalls: []
+      }
+    }
+
+    return {
+      text: content ?? '',
+      toolCalls
+    }
   }
 }

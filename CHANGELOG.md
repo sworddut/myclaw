@@ -1,5 +1,22 @@
 # Changelog
 
+## v0.3.0 - 2026-02-17
+
+### Added
+- In-process EventBus (`core/event-bus`) to decouple runtime execution from observability.
+- `SessionLogSubscriber` to persist session events/messages/summaries into `~/.myclaw/sessions/<session-id>.jsonl`.
+- `MetricsSubscriber` to persist runtime metrics into `~/.myclaw/metrics/<session-id>.jsonl`.
+- Oscillation observation event (`oscillation_observe`) with repeat/novelty/no-mutation indicators.
+- Engineering retrospective doc: `docs/RETROSPECTIVE_2026-02.md`.
+
+### Changed
+- Provider interface now supports native tool calling response shape (`text + toolCalls`).
+- OpenAI provider now uses SDK-native tools API first, with text JSON parsing as fallback.
+- Tool response compatibility improved for OpenAI-compatible gateways (tool `name` + `tool_call_id`).
+- Empty model response handling improved with retry + safe fallback message.
+- Runtime events are now emitted through bus subscribers instead of inline monitoring logic.
+- System prompt refined to reduce repeated exploration and avoid tool usage for casual chat/greetings.
+
 ## v0.2.1 - 2026-02-16
 
 ### Changed

@@ -1,9 +1,14 @@
 import {loadConfig} from '../config/load-config.js'
-import {appendFile, mkdir, readdir, readFile} from 'node:fs/promises'
+import {mkdir, readdir, readFile} from 'node:fs/promises'
 import {basename} from 'node:path'
 import {MockProvider} from '../providers/mock-provider.js'
 import {OpenAIProvider} from '../providers/openai-provider.js'
-import type {ChatMessage, LLMProvider} from '../providers/types.js'
+import type {
+  ChatMessage,
+  LLMProvider,
+  ProviderToolCall,
+  ProviderToolDefinition
+} from '../providers/types.js'
 import {getSessionLogPath, getSessionsDir} from '../config/paths.js'
 import {
   applyTextPatch,
@@ -16,6 +21,7 @@ import {
 } from '../tools/filesystem.js'
 import {runShell} from '../tools/shell.js'
 import {AgentSession, InMemorySessionStore, type SessionSummaryBlock} from './session-store.js'
+import type {EventBus} from './event-bus.js'
 
 const sessionStore = new InMemorySessionStore()
 const CONTEXT_WINDOW_SIZE = 20
@@ -54,21 +60,124 @@ function providerFromConfig(name: string, model: string, baseURL?: string): LLMP
 type ToolName = 'read_file' | 'write_file' | 'apply_patch' | 'list_files' | 'search_workspace' | 'run_shell'
 
 type ToolCall = {
-  type: 'tool_call'
   tool: ToolName
   input: Record<string, unknown>
+  id?: string
 }
 
+const TOOL_DEFINITIONS: ProviderToolDefinition[] = [
+  {
+    name: 'read_file',
+    description: 'Read a UTF-8 text file from workspace by relative path.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        path: {type: 'string'}
+      },
+      required: ['path'],
+      additionalProperties: false
+    }
+  },
+  {
+    name: 'write_file',
+    description: 'Write or create a UTF-8 text file. Existing files must be read first in this session.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        path: {type: 'string'},
+        content: {type: 'string'},
+        allowCreate: {type: 'boolean'}
+      },
+      required: ['path', 'content'],
+      additionalProperties: false
+    }
+  },
+  {
+    name: 'apply_patch',
+    description: 'Patch one file by replacing search text with replacement text.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        path: {type: 'string'},
+        search: {type: 'string'},
+        replace: {type: 'string'},
+        replaceAll: {type: 'boolean'}
+      },
+      required: ['path', 'search', 'replace'],
+      additionalProperties: false
+    }
+  },
+  {
+    name: 'list_files',
+    description: 'List files in a relative directory path.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        path: {type: 'string'}
+      },
+      additionalProperties: false
+    }
+  },
+  {
+    name: 'search_workspace',
+    description: 'Find file paths containing a query under workspace.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        query: {type: 'string'},
+        path: {type: 'string'}
+      },
+      required: ['query'],
+      additionalProperties: false
+    }
+  },
+  {
+    name: 'run_shell',
+    description: 'Run a shell command in workspace and return output.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        command: {type: 'string'}
+      },
+      required: ['command'],
+      additionalProperties: false
+    }
+  }
+]
+
 export type AgentEvent =
-  | {type: 'start'; provider: string; model: string; workspace: string; sessionId: string}
-  | {type: 'model_response'; step: number; content: string}
-  | {type: 'tool_call'; step: number; tool: ToolName; input: Record<string, unknown>}
-  | {type: 'tool_result'; step: number; tool: ToolName; ok: boolean; output: string}
-  | {type: 'final'; step: number; content: string}
-  | {type: 'max_steps'; step: number}
+  | {
+      type: 'start'
+      provider: string
+      model: string
+      workspace: string
+      sessionId: string
+      logPath: string
+      systemPrompt: string
+    }
+  | {type: 'session_resume'; sessionId: string}
+  | {type: 'session_end'; sessionId: string}
+  | {type: 'message'; sessionId: string; role: ChatMessage['role']; content: string; step?: number}
+  | {type: 'summary'; sessionId: string; from: number; to: number; content: string}
+  | {type: 'model_response'; sessionId: string; step: number; content: string}
+  | {type: 'tool_call'; sessionId: string; step: number; tool: ToolName; input: Record<string, unknown>}
+  | {type: 'tool_result'; sessionId: string; step: number; tool: ToolName; ok: boolean; output: string}
+  | {
+      type: 'oscillation_observe'
+      sessionId: string
+      step: number
+      window: number
+      repeatRatio: number
+      noveltyRatio: number
+      noMutationSteps: number
+      possibleOscillation: boolean
+    }
+  | {type: 'final'; sessionId: string; step: number; content: string}
+  | {type: 'max_steps'; sessionId: string; step: number}
 
 type AgentRunOptions = {
   onEvent?: (event: AgentEvent) => void
+  bus?: EventBus<AgentEvent>
   maxSteps?: number
   contextWindowSize?: number
   onSensitiveAction?: (request: {tool: ToolName; command: string}) => Promise<boolean> | boolean
@@ -83,24 +192,20 @@ export type PersistedSessionSummary = {
   logPath: string
 }
 
-type SessionLogRecord = {
-  ts: string
-  type: string
-  [key: string]: unknown
-}
-
-async function appendSessionLog(session: AgentSession, record: SessionLogRecord): Promise<void> {
-  if (!session.logPath) return
-  try {
-    await appendFile(session.logPath, `${JSON.stringify(record)}\n`, 'utf8')
-  } catch {
-    // Best effort: logging must never break agent execution.
-  }
-}
-
 function parseSessionIdFromPath(logPath: string): string {
   const fileName = basename(logPath)
   return fileName.endsWith('.jsonl') ? fileName.slice(0, -'.jsonl'.length) : fileName
+}
+
+type SessionLogRecord = {
+  ts?: string
+  type?: string
+  role?: string
+  content?: string
+  from?: number
+  to?: number
+  workspace?: string
+  [key: string]: unknown
 }
 
 function summarizeMessages(messages: ChatMessage[]): string {
@@ -126,7 +231,7 @@ function summarizeMessages(messages: ChatMessage[]): string {
   return lines.join('\n')
 }
 
-async function maybeCompressContext(session: AgentSession): Promise<void> {
+function maybeCompressContext(session: AgentSession, options: AgentRunOptions): void {
   const nonSystemMessages = session.messages.filter((message) => message.role !== 'system')
   while (nonSystemMessages.length - session.compressedCount > COMPRESSION_TRIGGER_SIZE) {
     const chunkStart = session.compressedCount
@@ -143,9 +248,9 @@ async function maybeCompressContext(session: AgentSession): Promise<void> {
     session.summaries.push(summary)
     session.compressedCount += chunk.length
 
-    await appendSessionLog(session, {
-      ts: summary.ts,
+    emitEvent(options, {
       type: 'summary',
+      sessionId: session.id,
       from: summary.from,
       to: summary.to,
       content: summary.content
@@ -250,6 +355,17 @@ function extractJsonObjects(text: string): string[] {
   return blocks
 }
 
+function isToolName(value: string): value is ToolName {
+  return (
+    value === 'read_file' ||
+    value === 'write_file' ||
+    value === 'apply_patch' ||
+    value === 'list_files' ||
+    value === 'search_workspace' ||
+    value === 'run_shell'
+  )
+}
+
 function parseToolCalls(text: string): ToolCall[] {
   const block = extractJsonBlock(text)
   const candidates = block ? [block] : extractJsonObjects(text)
@@ -257,15 +373,36 @@ function parseToolCalls(text: string): ToolCall[] {
 
   for (const candidate of candidates) {
     try {
-      const parsed = JSON.parse(candidate) as Partial<ToolCall>
-      if (parsed.type !== 'tool_call') continue
-      if (!parsed.tool || !parsed.input) continue
-      calls.push(parsed as ToolCall)
+      const parsed = JSON.parse(candidate) as {
+        type?: string
+        tool?: unknown
+        input?: unknown
+      }
+      if (parsed.type && parsed.type !== 'tool_call') continue
+      if (typeof parsed.tool !== 'string' || !isToolName(parsed.tool)) continue
+      if (!parsed.input || typeof parsed.input !== 'object' || Array.isArray(parsed.input)) continue
+      calls.push({
+        tool: parsed.tool,
+        input: parsed.input as Record<string, unknown>
+      })
     } catch {
       continue
     }
   }
 
+  return calls
+}
+
+function normalizeProviderToolCalls(toolCalls: ProviderToolCall[]): ToolCall[] {
+  const calls: ToolCall[] = []
+  for (const toolCall of toolCalls) {
+    if (!isToolName(toolCall.name)) continue
+    calls.push({
+      id: toolCall.id,
+      tool: toolCall.name,
+      input: toolCall.input
+    })
+  }
   return calls
 }
 
@@ -285,6 +422,13 @@ function shellDangerRejectedError(command: string): string {
   return `run_shell rejected: destructive command blocked. command=${command}`
 }
 
+function normalizeWriteContent(content: string): string {
+  // Tool-call JSON may decode "\r" and some "\n" escapes into raw control chars.
+  // Convert them back to escaped sequences to keep source files syntactically stable.
+  const withEscapedCarriage = content.replace(/\r/g, '\\r')
+  return withEscapedCarriage.replace(/(["'])\n(?=[^\n]*\1)/g, '$1\\n')
+}
+
 function looksDestructiveCommand(command: string): boolean {
   const text = command.toLowerCase().trim()
   const patterns = [
@@ -298,6 +442,38 @@ function looksDestructiveCommand(command: string): boolean {
     /\bgit\s+clean\b/
   ]
   return patterns.some((pattern) => pattern.test(text))
+}
+
+function isLikelyReadOnlyLsCommand(command: string): boolean {
+  const text = command.trim().toLowerCase()
+  return /^ls(\s|$)/.test(text) || text === 'pwd'
+}
+
+function isLowValueExplorationCall(toolCall: ToolCall): boolean {
+  if (toolCall.tool === 'list_files' || toolCall.tool === 'search_workspace') return true
+  if (toolCall.tool === 'run_shell') {
+    const command = String(toolCall.input.command ?? '')
+    return isLikelyReadOnlyLsCommand(command)
+  }
+  return false
+}
+
+function toolCallSignature(toolCall: ToolCall): string {
+  return `${toolCall.tool}:${JSON.stringify(toolCall.input)}`
+}
+
+function normalizeOutputForNovelty(output: string): string {
+  const oneLine = output.replace(/\s+/g, ' ').trim()
+  return oneLine.length > 220 ? oneLine.slice(0, 220) : oneLine
+}
+
+function ratio(value: number): number {
+  return Number(value.toFixed(3))
+}
+
+function emitEvent(options: AgentRunOptions, event: AgentEvent): void {
+  options.onEvent?.(event)
+  options.bus?.publish(event)
 }
 
 async function executeTool(
@@ -316,7 +492,7 @@ async function executeTool(
 
       case 'write_file': {
         const path = String(toolCall.input.path ?? '')
-        const content = String(toolCall.input.content ?? '')
+        const content = normalizeWriteContent(String(toolCall.input.content ?? ''))
         const allowCreate = Boolean(toolCall.input.allowCreate ?? false)
         const existing = await fileExists(session.workspace, path)
         const canonicalPath = resolveWorkspacePath(session.workspace, path)
@@ -387,7 +563,8 @@ async function executeTool(
 function buildSystemPrompt(workspace: string): string {
   return [
     `You are a coding agent running in workspace: ${workspace}.`,
-    'When you need to operate files or shell, respond with ONLY JSON:',
+    'Use available tools for file/shell operations.',
+    'If the model/tooling does not support native tool calling, fallback to JSON:',
     '{"type":"tool_call","tool":"read_file|write_file|apply_patch|list_files|search_workspace|run_shell","input":{...}}',
     'Available tools:',
     '- read_file: {"path":"relative/path"}',
@@ -403,9 +580,21 @@ function buildSystemPrompt(workspace: string): string {
     '- Destructive shell commands (e.g., rm/rmdir/unlink/del/git reset --hard/git clean) are sensitive and need approval.',
     '- You may call multiple read_file tools in one response.',
     '- At most one mutation tool (write_file or apply_patch) per response.',
+    '- Avoid repeated or equivalent exploration on the same path without new evidence.',
+    '- If two consecutive exploration steps add little new information, stop and switch strategy.',
+    '- For greetings, casual chat, or meta questions, do NOT call tools; answer directly.',
     'Use relative paths. Never wrap JSON with extra prose when calling tools.',
-    'When finished, return a normal natural-language summary.'
+    'When finished, return a concise task report only (what changed + key result).',
+    'Do not paste full file contents or large code blocks unless the user explicitly asks.'
   ].join('\n')
+}
+
+function normalizeFinalAssistantText(text: string): string {
+  const trimmed = text.trim()
+  if (trimmed === 'Model returned an empty response after tool execution. No further action required.') {
+    return '任务已执行完成（模型在收尾阶段返回空响应）。如果你愿意，我可以继续帮你验证文件内容或运行结果。'
+  }
+  return text
 }
 
 function buildContext(messages: ChatMessage[], windowSize: number): ChatMessage[] {
@@ -498,25 +687,14 @@ export async function createAgentSession(options: AgentRunOptions = {}): Promise
   })
   created.logPath = getSessionLogPath(created.id, config.homeDir)
 
-  await appendSessionLog(created, {
-    ts: new Date().toISOString(),
-    type: 'session_start',
-    sessionId: created.id,
-    workspace
-  })
-  await appendSessionLog(created, {
-    ts: new Date().toISOString(),
-    type: 'message',
-    role: 'system',
-    content: systemPrompt
-  })
-
-  options.onEvent?.({
+  emitEvent(options, {
     type: 'start',
     provider: config.provider,
     model: resolvedModel,
     workspace,
-    sessionId: created.id
+    sessionId: created.id,
+    logPath: created.logPath,
+    systemPrompt
   })
 
   return created.id
@@ -585,19 +763,16 @@ export async function resumeAgentSession(sessionId: string, options: AgentRunOpt
     messages: restoredMessages
   })
 
-  const resumed = sessionStore.get(sessionId)
-  await appendSessionLog(resumed, {
-    ts: new Date().toISOString(),
-    type: 'session_resume',
-    sessionId
-  })
+  emitEvent(options, {type: 'session_resume', sessionId})
 
-  options.onEvent?.({
+  emitEvent(options, {
     type: 'start',
     provider: config.provider,
     model: resolvedModel,
     workspace,
-    sessionId
+    sessionId,
+    logPath,
+    systemPrompt: restoredMessages.find((message) => message.role === 'system')?.content ?? buildSystemPrompt(workspace)
   })
 
   return sessionId
@@ -611,40 +786,39 @@ export async function runAgentTurn(
   const session = sessionStore.get(sessionId)
   const maxSteps = options.maxSteps ?? 8
   const contextWindowSize = options.contextWindowSize ?? CONTEXT_WINDOW_SIZE
+  const explorationCounts = new Map<string, number>()
+  let workspaceVersion = 0
+  const metricsWindow = 6
+  const recentCallSignatures: string[] = []
+  const recentOutputFingerprints: string[] = []
+  let noMutationSteps = 0
 
   session.messages.push({role: 'user', content: userMessage})
-  await appendSessionLog(session, {
-    ts: new Date().toISOString(),
-    type: 'message',
-    role: 'user',
-    content: userMessage
-  })
+  emitEvent(options, {type: 'message', sessionId, role: 'user', content: userMessage})
 
   for (let step = 0; step < maxSteps; step += 1) {
-    await maybeCompressContext(session)
+    maybeCompressContext(session, options)
     const context = buildContextFromSession(session, contextWindowSize)
-    const assistantText = await session.provider.chat(context)
-    options.onEvent?.({type: 'model_response', step, content: assistantText})
+    const providerResponse = await session.provider.chat(context, TOOL_DEFINITIONS)
+    const assistantText = normalizeFinalAssistantText(providerResponse.text)
+    emitEvent(options, {type: 'model_response', sessionId, step, content: assistantText})
     session.messages.push({role: 'assistant', content: assistantText})
-    await appendSessionLog(session, {
-      ts: new Date().toISOString(),
-      type: 'message',
-      role: 'assistant',
-      step,
-      content: assistantText
-    })
+    emitEvent(options, {type: 'message', sessionId, role: 'assistant', step, content: assistantText})
 
-    const toolCalls = parseToolCalls(assistantText)
+    const nativeCalls = normalizeProviderToolCalls(providerResponse.toolCalls)
+    const fallbackCalls = parseToolCalls(assistantText)
+    const toolCalls: ToolCall[] = nativeCalls.length > 0 ? nativeCalls : fallbackCalls
     if (toolCalls.length === 0) {
-      options.onEvent?.({type: 'final', step, content: assistantText})
+      emitEvent(options, {type: 'final', sessionId, step, content: assistantText})
       return assistantText
     }
 
     if (mutationCount(toolCalls) > 1) {
       const output = 'Batch rejected: only one mutation tool (write_file/apply_patch) is allowed per step.'
       const mutationTool = toolCalls.find((call) => call.tool === 'write_file' || call.tool === 'apply_patch')
-      options.onEvent?.({
+      emitEvent(options, {
         type: 'tool_result',
+        sessionId,
         step,
         tool: mutationTool?.tool ?? 'write_file',
         ok: false,
@@ -652,11 +826,12 @@ export async function runAgentTurn(
       })
       session.messages.push({
         role: 'tool',
-        content: `TOOL_RESULT ${JSON.stringify({tool: 'batch_validation', ok: false, output})}`
+        content: `TOOL_RESULT ${JSON.stringify({tool: 'batch_validation', ok: false, output})}`,
+        toolName: 'batch_validation'
       })
-      await appendSessionLog(session, {
-        ts: new Date().toISOString(),
+      emitEvent(options, {
         type: 'message',
+        sessionId,
         role: 'tool',
         step,
         content: `TOOL_RESULT ${JSON.stringify({tool: 'batch_validation', ok: false, output})}`
@@ -664,11 +839,50 @@ export async function runAgentTurn(
       continue
     }
 
+    let stepHasSuccessfulMutation = false
+
     for (const toolCall of toolCalls) {
-      options.onEvent?.({type: 'tool_call', step, tool: toolCall.tool, input: toolCall.input})
+      const signature = `${workspaceVersion}:${toolCallSignature(toolCall)}`
+      if (isLowValueExplorationCall(toolCall)) {
+        const count = (explorationCounts.get(signature) ?? 0) + 1
+        explorationCounts.set(signature, count)
+        if (count > 1) {
+          const output = `Duplicate low-value exploration blocked: ${toolCall.tool} ${JSON.stringify(toolCall.input)}. Use existing results and continue.`
+          emitEvent(options, {
+            type: 'tool_result',
+            sessionId,
+            step,
+            tool: toolCall.tool,
+            ok: false,
+            output
+          })
+          session.messages.push({
+            role: 'tool',
+            content: `TOOL_RESULT ${JSON.stringify({tool: toolCall.tool, ok: false, output})}`,
+            toolCallId: toolCall.id,
+            toolName: toolCall.tool
+          })
+          emitEvent(options, {
+            type: 'message',
+            sessionId,
+            role: 'tool',
+            step,
+            content: `TOOL_RESULT ${JSON.stringify({tool: toolCall.tool, ok: false, output})}`
+          })
+          continue
+        }
+      }
+
+      emitEvent(options, {type: 'tool_call', sessionId, step, tool: toolCall.tool, input: toolCall.input})
       const result = await executeTool(toolCall, session, options)
-      options.onEvent?.({
+      recentCallSignatures.push(signature)
+      if (recentCallSignatures.length > metricsWindow) recentCallSignatures.shift()
+      recentOutputFingerprints.push(normalizeOutputForNovelty(result.output))
+      if (recentOutputFingerprints.length > metricsWindow) recentOutputFingerprints.shift()
+
+      emitEvent(options, {
         type: 'tool_result',
+        sessionId,
         step,
         tool: toolCall.tool,
         ok: result.ok,
@@ -676,29 +890,57 @@ export async function runAgentTurn(
       })
       session.messages.push({
         role: 'tool',
-        content: `TOOL_RESULT ${JSON.stringify({tool: toolCall.tool, ...result})}`
+        content: `TOOL_RESULT ${JSON.stringify({tool: toolCall.tool, ...result})}`,
+        toolCallId: toolCall.id,
+        toolName: toolCall.tool
       })
-      await appendSessionLog(session, {
-        ts: new Date().toISOString(),
+      emitEvent(options, {
         type: 'message',
+        sessionId,
         role: 'tool',
         step,
         content: `TOOL_RESULT ${JSON.stringify({tool: toolCall.tool, ...result})}`
       })
+
+      if (result.ok && (toolCall.tool === 'write_file' || toolCall.tool === 'apply_patch')) {
+        stepHasSuccessfulMutation = true
+        workspaceVersion += 1
+        explorationCounts.clear()
+      }
+    }
+
+    if (toolCalls.length > 0) {
+      noMutationSteps = stepHasSuccessfulMutation ? 0 : noMutationSteps + 1
+      const uniqueCalls = new Set(recentCallSignatures).size
+      const uniqueOutputs = new Set(recentOutputFingerprints.filter(Boolean)).size
+      const repeatRatio = recentCallSignatures.length
+        ? ratio((recentCallSignatures.length - uniqueCalls) / recentCallSignatures.length)
+        : 0
+      const noveltyRatio = recentOutputFingerprints.length
+        ? ratio(uniqueOutputs / recentOutputFingerprints.length)
+        : 0
+      const possibleOscillation = repeatRatio >= 0.5 && noveltyRatio <= 0.5 && noMutationSteps >= 2
+
+      emitEvent(options, {
+        type: 'oscillation_observe',
+        sessionId,
+        step,
+        window: metricsWindow,
+        repeatRatio,
+        noveltyRatio,
+        noMutationSteps,
+        possibleOscillation
+      })
     }
   }
 
-  options.onEvent?.({type: 'max_steps', step: maxSteps})
+  emitEvent(options, {type: 'max_steps', sessionId, step: maxSteps})
   return 'Stopped after maximum tool steps. Please refine the task and retry.'
 }
 
-export function closeAgentSession(sessionId: string): void {
+export function closeAgentSession(sessionId: string, options: AgentRunOptions = {}): void {
   const session = sessionStore.get(sessionId)
-  void appendSessionLog(session, {
-    ts: new Date().toISOString(),
-    type: 'session_end',
-    sessionId
-  })
+  emitEvent(options, {type: 'session_end', sessionId})
   sessionStore.delete(sessionId)
 }
 
@@ -717,6 +959,6 @@ export async function runAgentTask(task: string, options: AgentRunOptions = {}):
   try {
     return await runAgentTurn(sessionId, task, options)
   } finally {
-    closeAgentSession(sessionId)
+    closeAgentSession(sessionId, options)
   }
 }
