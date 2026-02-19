@@ -3,6 +3,9 @@ export type ChatMessage = {
   content: string
   toolCallId?: string
   toolName?: string
+  /** Native tool_calls returned by the model; stored on assistant messages so the
+   *  provider can replay them verbatim when rebuilding the conversation context. */
+  toolCalls?: ProviderToolCall[]
 }
 
 export type ProviderToolDefinition = {

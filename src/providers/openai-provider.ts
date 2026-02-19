@@ -125,7 +125,7 @@ export class OpenAIProvider implements LLMProvider {
   }
 
   async chat(messages: ChatMessage[], tools: ProviderToolDefinition[] = []): Promise<ProviderResponse> {
-    const mappedMessages: ChatCompletionMessageParam[] = messages.map((message) => {
+    const mappedMessages: ChatCompletionMessageParam[] = messages.map((message, index) => {
       if (message.role === 'tool') {
         if (message.toolCallId) {
           return {
@@ -141,6 +141,25 @@ export class OpenAIProvider implements LLMProvider {
           role: 'user',
           content: `[tool] ${message.content}`
         }
+      }
+
+      // Replay stored native tool_calls on assistant messages so OpenAI can
+      // match subsequent tool-result messages back to their originating call.
+      // Omitting tool_calls here causes a 400: "messages with role 'tool' must
+      // be a response to a preceeding message with 'tool_calls'".
+      if (message.role === 'assistant' && message.toolCalls && message.toolCalls.length > 0) {
+        return {
+          role: 'assistant',
+          content: message.content || null,
+          tool_calls: message.toolCalls.map((tc, i) => ({
+            id: tc.id ?? `call_${index}_${i}`,
+            type: 'function' as const,
+            function: {
+              name: tc.name,
+              arguments: JSON.stringify(tc.input)
+            }
+          }))
+        } as ChatCompletionMessageParam
       }
 
       return {

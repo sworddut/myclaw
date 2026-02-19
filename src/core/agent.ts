@@ -616,7 +616,20 @@ function buildContextFromSession(session: AgentSession, windowSize: number): Cha
   const systemMessage = session.messages.find((message) => message.role === 'system')
   const nonSystem = session.messages.filter((message) => message.role !== 'system')
   const start = Math.max(session.compressedCount, nonSystem.length - windowSize)
-  const recent = nonSystem.slice(start)
+  let recent = nonSystem.slice(start)
+
+  // If the window starts with one or more `tool` messages, their preceding
+  // `assistant` message (which carries `tool_calls`) was cut off.  Sending
+  // orphaned tool-result messages to OpenAI triggers a 400 error:
+  // "messages with role 'tool' must be a response to a preceeding message
+  // with 'tool_calls'".  Drop them from the front of the window so the
+  // context always begins with a valid message.
+  let trimIdx = 0
+  while (trimIdx < recent.length && recent[trimIdx].role === 'tool') {
+    trimIdx += 1
+  }
+  if (trimIdx > 0) recent = recent.slice(trimIdx)
+
   const summaryBlocks = session.summaries.slice(-MAX_SUMMARY_BLOCKS_IN_CONTEXT)
   const summaryMessage =
     summaryBlocks.length > 0
@@ -818,11 +831,18 @@ export async function runAgentTurn(
     emitEvent(options, {type: 'model_request_start', sessionId, step})
     const providerResponse = await session.provider.chat(context, TOOL_DEFINITIONS)
     const assistantText = normalizeFinalAssistantText(providerResponse.text)
-    emitEvent(options, {type: 'model_response', sessionId, step, content: assistantText})
-    session.messages.push({role: 'assistant', content: assistantText})
-    emitEvent(options, {type: 'message', sessionId, role: 'assistant', step, content: assistantText})
-
     const nativeCalls = normalizeProviderToolCalls(providerResponse.toolCalls)
+    emitEvent(options, {type: 'model_response', sessionId, step, content: assistantText})
+    session.messages.push({
+      role: 'assistant',
+      content: assistantText,
+      // Persist native tool_calls so the provider can replay them in subsequent
+      // turns; without this, OpenAI rejects the following tool-result messages
+      // with "messages with role 'tool' must be a response to a preceeding
+      // message with 'tool_calls'".
+      ...(providerResponse.toolCalls.length > 0 ? {toolCalls: providerResponse.toolCalls} : {})
+    })
+    emitEvent(options, {type: 'message', sessionId, role: 'assistant', step, content: assistantText})
     const fallbackCalls = parseToolCalls(assistantText)
     const toolCalls: ToolCall[] = nativeCalls.length > 0 ? nativeCalls : fallbackCalls
     if (toolCalls.length === 0) {
