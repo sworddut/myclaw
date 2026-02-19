@@ -25,7 +25,8 @@ node ./bin/run.js init -f
 ```
 
 `OPENAI_BASE_URL` and `.myclawrc.json` `baseURL` both support OpenAI-compatible providers.
-Model priority: `.myclawrc.json` `model` > `OPENAI_MODEL` > `gpt-4o-mini`.
+Model priority: `OPENAI_MODEL` > `.myclawrc.json` `model` > `gpt-4o-mini`.
+Runtime priority: env vars > `.myclawrc.json` `runtime` > defaults.
 
 ## Global Home Directory
 
@@ -34,6 +35,20 @@ Model priority: `.myclawrc.json` `model` > `OPENAI_MODEL` > `gpt-4o-mini`.
 - Global env file: `~/.myclaw/.env`
 - Memory file: `~/.myclaw/memory.md`
 - Session logs: `~/.myclaw/sessions/<session-id>.jsonl`
+- Metrics logs: `~/.myclaw/metrics/<session-id>.jsonl`
+
+Example `.myclawrc.json` runtime block:
+
+```json
+{
+  "runtime": {
+    "modelTimeoutMs": 45000,
+    "modelRetryCount": 1,
+    "maxSteps": 8,
+    "contextWindowSize": 20
+  }
+}
+```
 
 Create your global env:
 

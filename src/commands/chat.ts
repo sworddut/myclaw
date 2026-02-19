@@ -70,6 +70,8 @@ function baseEventLine(event: AgentEvent): string {
       return `[${now()}] MESSAGE session=${event.sessionId} role=${event.role} step=${event.step ?? '-'}`
     case 'summary':
       return `[${now()}] SUMMARY session=${event.sessionId} range=[${event.from}-${event.to}]`
+    case 'model_request_start':
+      return `[${now()}] MODEL_REQUEST_START step=${event.step}`
     case 'model_response':
       return `[${now()}] MODEL_RESPONSE step=${event.step}\n${shorten(event.content)}`
     case 'tool_call':

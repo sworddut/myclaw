@@ -56,6 +56,14 @@ export class MetricsSubscriber {
       state.lastEventAtMs = nowMs
 
       switch (event.type) {
+        case 'model_request_start':
+          await this.append(event.sessionId, {
+            ts,
+            type: 'model_request_start_metric',
+            step: event.step,
+            deltaMs
+          })
+          break
         case 'tool_call':
           state.toolCalls += 1
           await this.append(event.sessionId, {

@@ -16,6 +16,8 @@ type OpenAIProviderOptions = {
   apiKey: string
   model: string
   baseUrl?: string
+  timeoutMs?: number
+  retryCount?: number
 }
 
 function safeJsonSnippet(value: unknown): string {
@@ -93,15 +95,33 @@ export class OpenAIProvider implements LLMProvider {
   readonly name = 'openai'
   private readonly client: OpenAI
   private readonly model: string
+  private readonly timeoutMs: number
+  private readonly retryCount: number
 
   constructor(options: OpenAIProviderOptions) {
     this.model = options.model
+    this.timeoutMs = options.timeoutMs ?? 45_000
+    this.retryCount = options.retryCount ?? 1
     const rawBaseUrl = options.baseUrl ?? 'https://api.openai.com/v1'
     const baseURL = rawBaseUrl.replace(/\/+$/, '')
     this.client = new OpenAI({
       apiKey: options.apiKey,
       baseURL
     })
+  }
+
+  private async createWithTimeout(request: ChatCompletionCreateParamsNonStreaming) {
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      const id = setTimeout(() => {
+        reject(new Error(`Model request timed out after ${this.timeoutMs}ms`))
+      }, this.timeoutMs)
+      // Prevent timers from keeping process alive on some runtimes.
+      id.unref?.()
+    })
+
+    return (await Promise.race([this.client.chat.completions.create(request), timeoutPromise])) as Awaited<
+      ReturnType<OpenAI['chat']['completions']['create']>
+    >
   }
 
   async chat(messages: ChatMessage[], tools: ProviderToolDefinition[] = []): Promise<ProviderResponse> {
@@ -144,27 +164,41 @@ export class OpenAIProvider implements LLMProvider {
       ...(mappedTools.length > 0 ? {tools: mappedTools, tool_choice: 'auto' as const} : {})
     }
 
-    let completion = await this.client.chat.completions.create(request)
-    let content = extractText(completion)
-    let toolCalls = parseToolCalls(completion)
+    let lastError: unknown
+    for (let attempt = 0; attempt <= this.retryCount; attempt += 1) {
+      try {
+        const completion = await this.createWithTimeout(request)
+        const content = extractText(completion)
+        const toolCalls = parseToolCalls(completion)
+        if (!content && toolCalls.length === 0) {
+          throw new Error(`Model returned empty completion payload. Response snippet: ${safeJsonSnippet(completion)}`)
+        }
 
-    // Some OpenAI-compatible gateways may intermittently return choices: [].
-    if (!content && toolCalls.length === 0) {
-      completion = await this.client.chat.completions.create(request)
-      content = extractText(completion)
-      toolCalls = parseToolCalls(completion)
-    }
-
-    if (!content && toolCalls.length === 0) {
-      return {
-        text: 'Model returned an empty response after tool execution. No further action required.',
-        toolCalls: []
+        return {
+          text: content ?? '',
+          toolCalls
+        }
+      } catch (error) {
+        lastError = error
       }
     }
 
+    const message = lastError instanceof Error ? lastError.message : String(lastError)
     return {
-      text: content ?? '',
-      toolCalls
+      text: `Model request failed after ${this.retryCount + 1} attempts: ${message}`,
+      toolCalls: []
+    }
+  }
+
+  async healthCheck(): Promise<{ok: boolean; message?: string}> {
+    try {
+      await this.chat([{role: 'user', content: 'ping'}])
+      return {ok: true}
+    } catch (error) {
+      return {
+        ok: false,
+        message: error instanceof Error ? error.message : String(error)
+      }
     }
   }
 }

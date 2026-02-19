@@ -39,7 +39,12 @@ function resolveModel(configModel?: string): string {
   return nonEmpty(configModel) ?? nonEmpty(process.env.OPENAI_MODEL) ?? 'gpt-4o-mini'
 }
 
-function providerFromConfig(name: string, model: string, baseURL?: string): LLMProvider {
+function providerFromConfig(
+  name: string,
+  model: string,
+  baseURL: string | undefined,
+  runtime: {modelTimeoutMs: number; modelRetryCount: number}
+): LLMProvider {
   if (name === 'mock') return new MockProvider()
   if (name === 'openai') {
     const apiKey = process.env.OPENAI_API_KEY
@@ -50,7 +55,9 @@ function providerFromConfig(name: string, model: string, baseURL?: string): LLMP
     return new OpenAIProvider({
       apiKey,
       model,
-      baseUrl: nonEmpty(baseURL) ?? nonEmpty(process.env.OPENAI_BASE_URL)
+      baseUrl: nonEmpty(baseURL) ?? nonEmpty(process.env.OPENAI_BASE_URL),
+      timeoutMs: runtime.modelTimeoutMs,
+      retryCount: runtime.modelRetryCount
     })
   }
 
@@ -159,6 +166,7 @@ export type AgentEvent =
   | {type: 'session_end'; sessionId: string}
   | {type: 'message'; sessionId: string; role: ChatMessage['role']; content: string; step?: number}
   | {type: 'summary'; sessionId: string; from: number; to: number; content: string}
+  | {type: 'model_request_start'; sessionId: string; step: number}
   | {type: 'model_response'; sessionId: string; step: number; content: string}
   | {type: 'tool_call'; sessionId: string; step: number; tool: ToolName; input: Record<string, unknown>}
   | {type: 'tool_result'; sessionId: string; step: number; tool: ToolName; ok: boolean; output: string}
@@ -627,7 +635,7 @@ function buildContextFromSession(session: AgentSession, windowSize: number): Cha
 async function resolveRuntime() {
   const config = await loadConfig()
   const resolvedModel = resolveModel(config.model)
-  const provider = providerFromConfig(config.provider, resolvedModel, config.baseURL)
+  const provider = providerFromConfig(config.provider, resolvedModel, config.baseURL, config.runtime)
   return {config, resolvedModel, provider}
 }
 
@@ -680,6 +688,10 @@ export async function createAgentSession(options: AgentRunOptions = {}): Promise
     provider,
     workspace,
     logPath: placeholderLogPath,
+    runtime: {
+      maxSteps: config.runtime.maxSteps,
+      contextWindowSize: config.runtime.contextWindowSize
+    },
     readPaths: new Set<string>(),
     summaries: [],
     compressedCount: 0,
@@ -757,6 +769,10 @@ export async function resumeAgentSession(sessionId: string, options: AgentRunOpt
     provider,
     workspace,
     logPath,
+    runtime: {
+      maxSteps: config.runtime.maxSteps,
+      contextWindowSize: config.runtime.contextWindowSize
+    },
     readPaths: new Set<string>(),
     summaries: restoredSummaries,
     compressedCount,
@@ -784,8 +800,8 @@ export async function runAgentTurn(
   options: AgentRunOptions = {}
 ): Promise<string> {
   const session = sessionStore.get(sessionId)
-  const maxSteps = options.maxSteps ?? 8
-  const contextWindowSize = options.contextWindowSize ?? CONTEXT_WINDOW_SIZE
+  const maxSteps = options.maxSteps ?? session.runtime.maxSteps
+  const contextWindowSize = options.contextWindowSize ?? session.runtime.contextWindowSize
   const explorationCounts = new Map<string, number>()
   let workspaceVersion = 0
   const metricsWindow = 6
@@ -799,6 +815,7 @@ export async function runAgentTurn(
   for (let step = 0; step < maxSteps; step += 1) {
     maybeCompressContext(session, options)
     const context = buildContextFromSession(session, contextWindowSize)
+    emitEvent(options, {type: 'model_request_start', sessionId, step})
     const providerResponse = await session.provider.chat(context, TOOL_DEFINITIONS)
     const assistantText = normalizeFinalAssistantText(providerResponse.text)
     emitEvent(options, {type: 'model_response', sessionId, step, content: assistantText})

@@ -13,6 +13,10 @@ export type AgentSession = {
   provider: LLMProvider
   workspace: string
   logPath?: string
+  runtime: {
+    maxSteps: number
+    contextWindowSize: number
+  }
   messages: ChatMessage[]
   summaries: SessionSummaryBlock[]
   compressedCount: number
