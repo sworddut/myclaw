@@ -107,6 +107,15 @@ export class MetricsSubscriber {
             deltaMs
           })
           break
+        case 'context_trim':
+          await this.append(event.sessionId, {
+            ts,
+            type: 'context_trim_metric',
+            droppedToolMessages: event.droppedToolMessages,
+            windowSize: event.windowSize,
+            deltaMs
+          })
+          break
         case 'session_end':
           await this.append(event.sessionId, {
             ts,
@@ -118,6 +127,8 @@ export class MetricsSubscriber {
             oscillationAlerts: state.oscillationAlerts
           })
           this.states.delete(event.sessionId)
+          this.logPaths.delete(event.sessionId)
+          this.pendingBySession.delete(event.sessionId)
           break
       }
     }
@@ -139,5 +150,9 @@ export class MetricsSubscriber {
       })
     this.pendingBySession.set(sessionId, next)
     await next
+  }
+
+  async flush(): Promise<void> {
+    await Promise.all([...this.pendingBySession.values()].map((pending) => pending.catch(() => undefined)))
   }
 }
