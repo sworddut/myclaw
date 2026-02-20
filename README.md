@@ -128,22 +128,25 @@ src/config/         # config loader + schema
 test/               # tests
 ```
 
-## Known Limitations (v0.2.0)
+## Roadmap
 
-- Tool-calling protocol is JSON-in-text parsing, not native function-calling.
-- Session memory is in-process only (no persistent storage yet).
-- No git-aware safety flow (branching, checkpoint, rollback) yet.
-- Network/API retries and timeout policies are still basic.
-- Permission model is coarse-grained; no per-tool policy profile yet.
+Current strategy: **feature first, optimization after baseline capability is complete**.
 
-## TODO
+### High Priority (current)
 
-- Add interactive `chat` mode with persistent SQLite session history.
-- Add per-step command timeout/retry/backoff controls in config.
-- Add git checkpoint + rollback command before mutation steps.
-- Add path allowlist/denylist policy with per-tool enforcement.
-- Add native tool/function-calling mode when provider supports it.
-- Add E2E regression tests for multi-file debug scenarios.
+- Add one-step code review before mutation execution (pre-write quality gate).
+- Add user profiling/persona context so planning and response style can adapt per user/project.
+- Keep runtime stable while expanding core task coverage.
+
+### Medium Priority
+
+- Add MCP support for external tool ecosystems.
+- Add skill support for reusable task workflows and domain capabilities.
+
+### Long-term
+
+- Add SQL-backed persistence for sessions/memory indexing and replay analytics.
+- Upgrade oscillation governance from observation to active intervention policies.
 
 ## Release Automation
 
