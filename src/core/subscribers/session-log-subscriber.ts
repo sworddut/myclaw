@@ -21,6 +21,9 @@ export class SessionLogSubscriber {
         ts,
         type: 'session_start',
         sessionId: event.sessionId,
+        provider: event.provider,
+        model: event.model,
+        baseURL: event.baseURL,
         workspace: event.workspace
       })
       await this.append(event.sessionId, {
@@ -39,6 +42,8 @@ export class SessionLogSubscriber {
 
     if (event.type === 'session_end') {
       await this.append(event.sessionId, {ts, type: 'session_end', sessionId: event.sessionId})
+      this.logPaths.delete(event.sessionId)
+      this.pendingBySession.delete(event.sessionId)
       return
     }
 
@@ -48,7 +53,10 @@ export class SessionLogSubscriber {
         type: 'message',
         role: event.role,
         step: event.step,
-        content: event.content
+        content: event.content,
+        toolCallId: event.toolCallId,
+        toolName: event.toolName,
+        toolCalls: event.toolCalls
       })
       return
     }
@@ -80,5 +88,9 @@ export class SessionLogSubscriber {
       })
     this.pendingBySession.set(sessionId, next)
     await next
+  }
+
+  async flush(): Promise<void> {
+    await Promise.all([...this.pendingBySession.values()].map((pending) => pending.catch(() => undefined)))
   }
 }

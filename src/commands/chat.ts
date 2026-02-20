@@ -70,6 +70,8 @@ function baseEventLine(event: AgentEvent): string {
       return `[${now()}] MESSAGE session=${event.sessionId} role=${event.role} step=${event.step ?? '-'}`
     case 'summary':
       return `[${now()}] SUMMARY session=${event.sessionId} range=[${event.from}-${event.to}]`
+    case 'context_trim':
+      return `[${now()}] CONTEXT_TRIM session=${event.sessionId} dropped_tool_messages=${event.droppedToolMessages} window=${event.windowSize}`
     case 'model_request_start':
       return `[${now()}] MODEL_REQUEST_START step=${event.step}`
     case 'model_response':
@@ -329,10 +331,11 @@ export default class Chat extends Command {
         this.log(output)
       }
     } finally {
+      if (sessionId) closeAgentSession(sessionId, {bus})
+      await Promise.all([sessionLogSubscriber.flush(), metricsSubscriber.flush()])
       unsubscribe()
       unsubscribeLog()
       unsubscribeMetrics()
-      if (sessionId) closeAgentSession(sessionId, {bus})
       rl.close()
     }
   }

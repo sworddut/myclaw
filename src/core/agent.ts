@@ -157,6 +157,7 @@ export type AgentEvent =
       type: 'start'
       provider: string
       model: string
+      baseURL?: string
       workspace: string
       sessionId: string
       logPath: string
@@ -164,8 +165,18 @@ export type AgentEvent =
     }
   | {type: 'session_resume'; sessionId: string}
   | {type: 'session_end'; sessionId: string}
-  | {type: 'message'; sessionId: string; role: ChatMessage['role']; content: string; step?: number}
+  | {
+      type: 'message'
+      sessionId: string
+      role: ChatMessage['role']
+      content: string
+      step?: number
+      toolCallId?: string
+      toolName?: string
+      toolCalls?: ProviderToolCall[]
+    }
   | {type: 'summary'; sessionId: string; from: number; to: number; content: string}
+  | {type: 'context_trim'; sessionId: string; droppedToolMessages: number; windowSize: number}
   | {type: 'model_request_start'; sessionId: string; step: number}
   | {type: 'model_response'; sessionId: string; step: number; content: string}
   | {type: 'tool_call'; sessionId: string; step: number; tool: ToolName; input: Record<string, unknown>}
@@ -210,6 +221,9 @@ type SessionLogRecord = {
   type?: string
   role?: string
   content?: string
+  toolCallId?: string
+  toolName?: string
+  toolCalls?: ProviderToolCall[]
   from?: number
   to?: number
   workspace?: string
@@ -612,11 +626,32 @@ function buildContext(messages: ChatMessage[], windowSize: number): ChatMessage[
   return systemMessage ? [systemMessage, ...recent] : recent
 }
 
-function buildContextFromSession(session: AgentSession, windowSize: number): ChatMessage[] {
+function buildContextFromSession(session: AgentSession, windowSize: number, options?: AgentRunOptions): ChatMessage[] {
   const systemMessage = session.messages.find((message) => message.role === 'system')
   const nonSystem = session.messages.filter((message) => message.role !== 'system')
   const start = Math.max(session.compressedCount, nonSystem.length - windowSize)
-  const recent = nonSystem.slice(start)
+  let recent = nonSystem.slice(start)
+
+  // If the window starts with one or more `tool` messages, their preceding
+  // `assistant` message (which carries `tool_calls`) was cut off.  Sending
+  // orphaned tool-result messages to OpenAI triggers a 400 error:
+  // "messages with role 'tool' must be a response to a preceeding message
+  // with 'tool_calls'".  Drop them from the front of the window so the
+  // context always begins with a valid message.
+  let trimIdx = 0
+  while (trimIdx < recent.length && recent[trimIdx].role === 'tool') {
+    trimIdx += 1
+  }
+  if (trimIdx > 0) {
+    recent = recent.slice(trimIdx)
+    emitEvent(options ?? {}, {
+      type: 'context_trim',
+      sessionId: session.id,
+      droppedToolMessages: trimIdx,
+      windowSize
+    })
+  }
+
   const summaryBlocks = session.summaries.slice(-MAX_SUMMARY_BLOCKS_IN_CONTEXT)
   const summaryMessage =
     summaryBlocks.length > 0
@@ -636,7 +671,8 @@ async function resolveRuntime() {
   const config = await loadConfig()
   const resolvedModel = resolveModel(config.model)
   const provider = providerFromConfig(config.provider, resolvedModel, config.baseURL, config.runtime)
-  return {config, resolvedModel, provider}
+  const resolvedBaseURL = nonEmpty(config.baseURL) ?? nonEmpty(process.env.OPENAI_BASE_URL)
+  return {config, resolvedModel, resolvedBaseURL, provider}
 }
 
 export async function listPersistedSessionsForWorkspace(workspace?: string): Promise<PersistedSessionSummary[]> {
@@ -672,7 +708,7 @@ export async function listPersistedSessionsForWorkspace(workspace?: string): Pro
 }
 
 export async function createAgentSession(options: AgentRunOptions = {}): Promise<string> {
-  const {config, resolvedModel, provider} = await resolveRuntime()
+  const {config, resolvedModel, resolvedBaseURL, provider} = await resolveRuntime()
   const workspace = config.workspace
   const systemPrompt = buildSystemPrompt(workspace)
 
@@ -703,6 +739,7 @@ export async function createAgentSession(options: AgentRunOptions = {}): Promise
     type: 'start',
     provider: config.provider,
     model: resolvedModel,
+    baseURL: resolvedBaseURL,
     workspace,
     sessionId: created.id,
     logPath: created.logPath,
@@ -715,7 +752,7 @@ export async function createAgentSession(options: AgentRunOptions = {}): Promise
 export async function resumeAgentSession(sessionId: string, options: AgentRunOptions = {}): Promise<string> {
   if (sessionStore.has(sessionId)) return sessionId
 
-  const {config, resolvedModel, provider} = await resolveRuntime()
+  const {config, resolvedModel, resolvedBaseURL, provider} = await resolveRuntime()
   const workspace = config.workspace
   const logPath = getSessionLogPath(sessionId, config.homeDir)
   const raw = await readFile(logPath, 'utf8')
@@ -738,7 +775,17 @@ export async function resumeAgentSession(sessionId: string, options: AgentRunOpt
       (role === 'system' || role === 'user' || role === 'assistant' || role === 'tool') &&
       typeof content === 'string'
     ) {
-      restoredMessages.push({role, content})
+      const restored: ChatMessage = {role, content}
+      if (typeof record.toolCallId === 'string') restored.toolCallId = record.toolCallId
+      if (typeof record.toolName === 'string') restored.toolName = record.toolName
+      if (Array.isArray(record.toolCalls)) {
+        restored.toolCalls = record.toolCalls.filter((item): item is ProviderToolCall => {
+          if (!item || typeof item !== 'object') return false
+          const candidate = item as Record<string, unknown>
+          return typeof candidate.name === 'string' && typeof candidate.input === 'object' && candidate.input !== null
+        })
+      }
+      restoredMessages.push(restored)
     }
     continue
   }
@@ -785,6 +832,7 @@ export async function resumeAgentSession(sessionId: string, options: AgentRunOpt
     type: 'start',
     provider: config.provider,
     model: resolvedModel,
+    baseURL: resolvedBaseURL,
     workspace,
     sessionId,
     logPath,
@@ -814,15 +862,29 @@ export async function runAgentTurn(
 
   for (let step = 0; step < maxSteps; step += 1) {
     maybeCompressContext(session, options)
-    const context = buildContextFromSession(session, contextWindowSize)
+    const context = buildContextFromSession(session, contextWindowSize, options)
     emitEvent(options, {type: 'model_request_start', sessionId, step})
     const providerResponse = await session.provider.chat(context, TOOL_DEFINITIONS)
     const assistantText = normalizeFinalAssistantText(providerResponse.text)
-    emitEvent(options, {type: 'model_response', sessionId, step, content: assistantText})
-    session.messages.push({role: 'assistant', content: assistantText})
-    emitEvent(options, {type: 'message', sessionId, role: 'assistant', step, content: assistantText})
-
     const nativeCalls = normalizeProviderToolCalls(providerResponse.toolCalls)
+    emitEvent(options, {type: 'model_response', sessionId, step, content: assistantText})
+    session.messages.push({
+      role: 'assistant',
+      content: assistantText,
+      // Persist native tool_calls so the provider can replay them in subsequent
+      // turns; without this, OpenAI rejects the following tool-result messages
+      // with "messages with role 'tool' must be a response to a preceeding
+      // message with 'tool_calls'".
+      ...(providerResponse.toolCalls.length > 0 ? {toolCalls: providerResponse.toolCalls} : {})
+    })
+    emitEvent(options, {
+      type: 'message',
+      sessionId,
+      role: 'assistant',
+      step,
+      content: assistantText,
+      ...(providerResponse.toolCalls.length > 0 ? {toolCalls: providerResponse.toolCalls} : {})
+    })
     const fallbackCalls = parseToolCalls(assistantText)
     const toolCalls: ToolCall[] = nativeCalls.length > 0 ? nativeCalls : fallbackCalls
     if (toolCalls.length === 0) {
@@ -851,7 +913,8 @@ export async function runAgentTurn(
         sessionId,
         role: 'tool',
         step,
-        content: `TOOL_RESULT ${JSON.stringify({tool: 'batch_validation', ok: false, output})}`
+        content: `TOOL_RESULT ${JSON.stringify({tool: 'batch_validation', ok: false, output})}`,
+        toolName: 'batch_validation'
       })
       continue
     }
@@ -884,7 +947,9 @@ export async function runAgentTurn(
             sessionId,
             role: 'tool',
             step,
-            content: `TOOL_RESULT ${JSON.stringify({tool: toolCall.tool, ok: false, output})}`
+            content: `TOOL_RESULT ${JSON.stringify({tool: toolCall.tool, ok: false, output})}`,
+            toolCallId: toolCall.id,
+            toolName: toolCall.tool
           })
           continue
         }
@@ -916,7 +981,9 @@ export async function runAgentTurn(
         sessionId,
         role: 'tool',
         step,
-        content: `TOOL_RESULT ${JSON.stringify({tool: toolCall.tool, ...result})}`
+        content: `TOOL_RESULT ${JSON.stringify({tool: toolCall.tool, ...result})}`,
+        toolCallId: toolCall.id,
+        toolName: toolCall.tool
       })
 
       if (result.ok && (toolCall.tool === 'write_file' || toolCall.tool === 'apply_patch')) {
