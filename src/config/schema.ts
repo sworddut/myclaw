@@ -23,6 +23,12 @@ export const appConfigSchema = z.object({
       maxSteps: positiveInt.default(8),
       contextWindowSize: positiveInt.default(20)
     })
+    .default({}),
+  review: z
+    .object({
+      enabled: z.boolean().default(true),
+      tools: z.record(z.string(), z.string()).optional()
+    })
     .default({})
 }).transform((config) => ({
   ...config,

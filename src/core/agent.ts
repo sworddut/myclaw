@@ -20,8 +20,10 @@ import {
   writeTextFile
 } from '../tools/filesystem.js'
 import {runShell} from '../tools/shell.js'
-import {AgentSession, InMemorySessionStore, type SessionSummaryBlock} from './session-store.js'
+import {AgentSession, InMemorySessionStore, type InterruptMessage, type ReviewConfig, type SessionSummaryBlock} from './session-store.js'
 import type {EventBus} from './event-bus.js'
+import {InterruptQueue} from './interrupt-queue.js'
+import {runCodeReview} from '../tools/code-review.js'
 
 const sessionStore = new InMemorySessionStore()
 const CONTEXT_WINDOW_SIZE = 20
@@ -191,6 +193,9 @@ export type AgentEvent =
       noMutationSteps: number
       possibleOscillation: boolean
     }
+  | {type: 'review_start'; sessionId: string; step: number; file: string; linter: string}
+  | {type: 'review_pass'; sessionId: string; file: string; linter: string}
+  | {type: 'review_fail'; sessionId: string; file: string; linter: string; output: string}
   | {type: 'final'; sessionId: string; step: number; content: string}
   | {type: 'max_steps'; sessionId: string; step: number}
 
@@ -200,6 +205,7 @@ type AgentRunOptions = {
   maxSteps?: number
   contextWindowSize?: number
   onSensitiveAction?: (request: {tool: ToolName; command: string}) => Promise<boolean> | boolean
+  reviewConfig?: ReviewConfig
 }
 
 export type PersistedSessionSummary = {
@@ -728,10 +734,12 @@ export async function createAgentSession(options: AgentRunOptions = {}): Promise
       maxSteps: config.runtime.maxSteps,
       contextWindowSize: config.runtime.contextWindowSize
     },
+    reviewConfig: config.review,
     readPaths: new Set<string>(),
     summaries: [],
     compressedCount: 0,
-    messages: [{role: 'system', content: systemPrompt}]
+    messages: [{role: 'system', content: systemPrompt}],
+    interruptQueue: new InterruptQueue<InterruptMessage>()
   })
   created.logPath = getSessionLogPath(created.id, config.homeDir)
 
@@ -820,10 +828,12 @@ export async function resumeAgentSession(sessionId: string, options: AgentRunOpt
       maxSteps: config.runtime.maxSteps,
       contextWindowSize: config.runtime.contextWindowSize
     },
+    reviewConfig: config.review,
     readPaths: new Set<string>(),
     summaries: restoredSummaries,
     compressedCount,
-    messages: restoredMessages
+    messages: restoredMessages,
+    interruptQueue: new InterruptQueue<InterruptMessage>()
   })
 
   emitEvent(options, {type: 'session_resume', sessionId})
@@ -861,6 +871,12 @@ export async function runAgentTurn(
   emitEvent(options, {type: 'message', sessionId, role: 'user', content: userMessage})
 
   for (let step = 0; step < maxSteps; step += 1) {
+    const interrupts = session.interruptQueue.drain()
+    for (const msg of interrupts) {
+      session.messages.push(msg)
+      emitEvent(options, {type: 'message', sessionId, role: 'tool', step, content: msg.content, toolName: msg.toolName})
+    }
+
     maybeCompressContext(session, options)
     const context = buildContextFromSession(session, contextWindowSize, options)
     emitEvent(options, {type: 'model_request_start', sessionId, step})
@@ -888,6 +904,14 @@ export async function runAgentTurn(
     const fallbackCalls = parseToolCalls(assistantText)
     const toolCalls: ToolCall[] = nativeCalls.length > 0 ? nativeCalls : fallbackCalls
     if (toolCalls.length === 0) {
+      const pendingReviews = await session.interruptQueue.flush()
+      if (pendingReviews.length > 0) {
+        for (const msg of pendingReviews) {
+          session.messages.push(msg)
+          emitEvent(options, {type: 'message', sessionId, role: 'tool', step, content: msg.content, toolName: msg.toolName})
+        }
+        continue
+      }
       emitEvent(options, {type: 'final', sessionId, step, content: assistantText})
       return assistantText
     }
@@ -990,6 +1014,25 @@ export async function runAgentTurn(
         stepHasSuccessfulMutation = true
         workspaceVersion += 1
         explorationCounts.clear()
+
+        const filePath = String(toolCall.input.path ?? '')
+        const reviewCfg = options.reviewConfig ?? session.reviewConfig
+        if (reviewCfg.enabled) {
+          emitEvent(options, {type: 'review_start', sessionId, step, file: filePath, linter: 'auto'})
+          const reviewPromise = runCodeReview(filePath, session.workspace, reviewCfg).then((r) => {
+            if (r) {
+              emitEvent(options, {type: 'review_fail', sessionId, file: r.file, linter: r.linter, output: r.output})
+              return {
+                role: 'tool' as const,
+                content: `LINT_FAIL [${r.linter}] ${r.file}:\n${r.output}`,
+                toolName: 'code_review',
+              }
+            }
+            emitEvent(options, {type: 'review_pass', sessionId, file: filePath, linter: 'auto'})
+            return null
+          })
+          session.interruptQueue.enqueue(reviewPromise)
+        }
       }
     }
 
