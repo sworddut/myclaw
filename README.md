@@ -17,6 +17,24 @@ See `QUICK_START.md` for a 5-minute setup guide.
 
 ## Quick start
 
+Install from npm:
+
+```bash
+npm i -g @sworddut/myclaw
+myclaw init
+# then fill credentials in ~/.myclaw/.env (or $MYCLAW_HOME/.env)
+```
+
+Run:
+
+```bash
+myclaw chat
+# or
+myclaw run "implement hello world"
+```
+
+## Local development
+
 ```bash
 npm install
 npm run build
@@ -47,9 +65,20 @@ Example `.myclawrc.json` runtime block:
     "modelTimeoutMs": 45000,
     "modelRetryCount": 1,
     "maxSteps": 8,
-    "contextWindowSize": 20
+    "contextWindowSize": 20,
+    "checks": {
+      "eslint": {
+        "enabled": true
+      }
+    }
   }
 }
+```
+
+You can also disable async ESLint soft-gate by env:
+
+```bash
+MYCLAW_ESLINT_CHECK_ENABLED=false
 ```
 
 Create your global env:
@@ -136,9 +165,19 @@ Current strategy: **feature first, optimization after baseline capability is com
 
 ### High Priority (current)
 
-- Add one-step code review before mutation execution (pre-write quality gate).
-- Add user profiling/persona context so planning and response style can adapt per user/project.
-- Keep runtime stable while expanding core task coverage.
+- Done: one-step async code review/check pipeline (soft-gate).
+  - `write_completed` event triggers background checks.
+  - JS syntax check: `node --check`
+  - Python syntax check: `python3 -m py_compile`
+  - Optional ESLint check (enabled only when `eslint.config.*` exists).
+  - Failed checks are injected as `tool_result` to drive model self-fix.
+- Done: cross-session stable user profile memory.
+  - Stored at `~/.myclaw/user-profile.json` as one stable profile (continuous update).
+  - Injected into system context as concise preference/environment hints.
+  - Updated only on high-value signals (not every turn).
+- Next in high priority:
+  - Add error fingerprint dedupe + max-injection cap for soft-gate.
+  - Add explicit user controls (`/profile show|set|unset|reset`).
 
 ### Medium Priority
 

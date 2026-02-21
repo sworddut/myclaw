@@ -15,25 +15,31 @@ Deliver core coding-agent capability first, then optimize stability/performance:
 
 ## Milestones
 
-### M1 (v0.3.x): Pre-write Code Review + User Profile (High Priority)
+### M1 (v0.3.x): Async Soft-Gate Checks + User Profile (High Priority, Done)
 
 #### Scope
-- Add one-step code review/check before or right after mutation (`write_file` / `apply_patch`).
-- Add user profile/persona config and inject into planning context.
+- Add non-blocking checks right after mutation (`write_file` / `apply_patch`).
+- Add cross-session stable user profile and inject concise hints into context.
 - Keep existing runtime and event loop stable.
 
-#### Deliverables
-- `CheckSubscriber` in observe mode first; configurable enforce mode.
-- Profile schema in config (`userProfile`) with safe defaults.
-- New events: `post_write_check_start/result`, `profile_applied`.
+#### Delivered
+- Async check pipeline wired on `write_completed`.
+- JS syntax checker (`node --check`) and Python syntax checker (`python3 -m py_compile`).
+- Optional ESLint checker (enabled only when local `eslint.config.*` exists).
+- Failure reports injected as `tool_result` to enable self-fix.
+- Stable user profile stored at `~/.myclaw/user-profile.json` and updated on high-value signals.
 
-#### Acceptance
-- Build/test pass in CI.
-- At least 20 manual runs:
-  - Check pipeline triggered on >= 95% mutation steps.
-  - False blocking rate <= 5% in observe mode.
-  - No regression in tool-call success rate.
-- Session/metrics logs contain check/profile events.
+#### Acceptance Status
+- Build/test: pass.
+- Manual verification: pass on JS/Python syntax error scenarios.
+- Check pipeline trigger: enabled on mutation completion path.
+- Runtime behavior: soft-gate non-blocking path verified.
+- Session/metrics observability: check/profile events persisted.
+
+#### Remaining for M1 hardening
+- Error fingerprint dedupe for repeated identical check failures.
+- Max injection cap per turn/session to reduce noise.
+- `/profile show|set|unset|reset` user controls.
 
 ### M2 (v0.4.0): MCP + Skill Support (Medium Priority)
 

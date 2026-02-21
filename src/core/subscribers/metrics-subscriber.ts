@@ -116,6 +116,28 @@ export class MetricsSubscriber {
             deltaMs
           })
           break
+        case 'write_completed':
+          await this.append(event.sessionId, {
+            ts,
+            type: 'write_completed_metric',
+            step: event.step,
+            tool: event.tool,
+            path: event.path,
+            deltaMs
+          })
+          break
+        case 'check_result':
+          await this.append(event.sessionId, {
+            ts,
+            type: 'check_result_metric',
+            step: event.step,
+            checker: event.checker,
+            ok: event.ok,
+            injected: event.injected,
+            path: event.path,
+            deltaMs
+          })
+          break
         case 'session_end':
           await this.append(event.sessionId, {
             ts,
