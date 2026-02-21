@@ -16,6 +16,7 @@ import {
 import {InMemoryEventBus} from '../core/event-bus.js'
 import {SessionLogSubscriber} from '../core/subscribers/session-log-subscriber.js'
 import {MetricsSubscriber} from '../core/subscribers/metrics-subscriber.js'
+import {UserProfileSubscriber} from '../core/subscribers/user-profile-subscriber.js'
 
 const CHAT_COMMANDS = [
   '/help',
@@ -142,11 +143,15 @@ export default class Chat extends Command {
     const bus = new InMemoryEventBus<AgentEvent>()
     const sessionLogSubscriber = new SessionLogSubscriber()
     const metricsSubscriber = new MetricsSubscriber()
+    const userProfileSubscriber = new UserProfileSubscriber()
     const unsubscribeLog = bus.subscribe((event) => {
       void sessionLogSubscriber.handle(event)
     })
     const unsubscribeMetrics = bus.subscribe((event) => {
       void metricsSubscriber.handle(event)
+    })
+    const unsubscribeProfile = bus.subscribe((event) => {
+      void userProfileSubscriber.handle(event)
     })
 
     const unsubscribe = flags.quiet
@@ -332,10 +337,11 @@ export default class Chat extends Command {
       }
     } finally {
       if (sessionId) closeAgentSession(sessionId, {bus})
-      await Promise.all([sessionLogSubscriber.flush(), metricsSubscriber.flush()])
+      await Promise.all([sessionLogSubscriber.flush(), metricsSubscriber.flush(), userProfileSubscriber.flush()])
       unsubscribe()
       unsubscribeLog()
       unsubscribeMetrics()
+      unsubscribeProfile()
       rl.close()
     }
   }

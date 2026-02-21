@@ -5,6 +5,7 @@ import {runAgentTask, type AgentEvent} from '../core/agent.js'
 import {InMemoryEventBus} from '../core/event-bus.js'
 import {SessionLogSubscriber} from '../core/subscribers/session-log-subscriber.js'
 import {MetricsSubscriber} from '../core/subscribers/metrics-subscriber.js'
+import {UserProfileSubscriber} from '../core/subscribers/user-profile-subscriber.js'
 
 const ANSI = {
   reset: '\x1b[0m',
@@ -81,11 +82,15 @@ export default class Run extends Command {
     const bus = new InMemoryEventBus<AgentEvent>()
     const sessionLogSubscriber = new SessionLogSubscriber()
     const metricsSubscriber = new MetricsSubscriber()
+    const userProfileSubscriber = new UserProfileSubscriber()
     const unsubscribeLog = bus.subscribe((event) => {
       void sessionLogSubscriber.handle(event)
     })
     const unsubscribeMetrics = bus.subscribe((event) => {
       void metricsSubscriber.handle(event)
+    })
+    const unsubscribeProfile = bus.subscribe((event) => {
+      void userProfileSubscriber.handle(event)
     })
     const unsubscribe = flags.quiet
       ? () => {}
@@ -137,10 +142,11 @@ export default class Run extends Command {
         }
       })
     } finally {
-      await Promise.all([sessionLogSubscriber.flush(), metricsSubscriber.flush()])
+      await Promise.all([sessionLogSubscriber.flush(), metricsSubscriber.flush(), userProfileSubscriber.flush()])
       unsubscribe()
       unsubscribeLog()
       unsubscribeMetrics()
+      unsubscribeProfile()
     }
 
     this.log(output)
