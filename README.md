@@ -17,6 +17,24 @@ See `QUICK_START.md` for a 5-minute setup guide.
 
 ## Quick start
 
+Install from npm:
+
+```bash
+npm i -g @sworddut/myclaw
+myclaw init
+# then fill credentials in ~/.myclaw/.env (or $MYCLAW_HOME/.env)
+```
+
+Run:
+
+```bash
+myclaw chat
+# or
+myclaw run "implement hello world"
+```
+
+## Local development
+
 ```bash
 npm install
 npm run build
@@ -34,6 +52,8 @@ Runtime priority: env vars > `.myclawrc.json` `runtime` > defaults.
 - Override with env: `MYCLAW_HOME=/custom/path`
 - Global env file: `~/.myclaw/.env`
 - Memory file: `~/.myclaw/memory.md`
+- User profile memory: `~/.myclaw/user-profile.json`
+  - Stores one stable cross-session profile and updates only on high-value signals.
 - Session logs: `~/.myclaw/sessions/<session-id>.jsonl`
 - Metrics logs: `~/.myclaw/metrics/<session-id>.jsonl`
 
@@ -45,9 +65,20 @@ Example `.myclawrc.json` runtime block:
     "modelTimeoutMs": 45000,
     "modelRetryCount": 1,
     "maxSteps": 8,
-    "contextWindowSize": 20
+    "contextWindowSize": 20,
+    "checks": {
+      "eslint": {
+        "enabled": true
+      }
+    }
   }
 }
+```
+
+You can also disable async ESLint soft-gate by env:
+
+```bash
+MYCLAW_ESLINT_CHECK_ENABLED=false
 ```
 
 Create your global env:
@@ -128,22 +159,35 @@ src/config/         # config loader + schema
 test/               # tests
 ```
 
-## Known Limitations (v0.2.0)
+## Roadmap
 
-- Tool-calling protocol is JSON-in-text parsing, not native function-calling.
-- Session memory is in-process only (no persistent storage yet).
-- No git-aware safety flow (branching, checkpoint, rollback) yet.
-- Network/API retries and timeout policies are still basic.
-- Permission model is coarse-grained; no per-tool policy profile yet.
+Current strategy: **feature first, optimization after baseline capability is complete**.
 
-## TODO
+### High Priority (current)
 
-- Add interactive `chat` mode with persistent SQLite session history.
-- Add per-step command timeout/retry/backoff controls in config.
-- Add git checkpoint + rollback command before mutation steps.
-- Add path allowlist/denylist policy with per-tool enforcement.
-- Add native tool/function-calling mode when provider supports it.
-- Add E2E regression tests for multi-file debug scenarios.
+- Done: one-step async code review/check pipeline (soft-gate).
+  - `write_completed` event triggers background checks.
+  - JS syntax check: `node --check`
+  - Python syntax check: `python3 -m py_compile`
+  - Optional ESLint check (enabled only when `eslint.config.*` exists).
+  - Failed checks are injected as `tool_result` to drive model self-fix.
+- Done: cross-session stable user profile memory.
+  - Stored at `~/.myclaw/user-profile.json` as one stable profile (continuous update).
+  - Injected into system context as concise preference/environment hints.
+  - Updated only on high-value signals (not every turn).
+- Next in high priority:
+  - Add error fingerprint dedupe + max-injection cap for soft-gate.
+  - Add explicit user controls (`/profile show|set|unset|reset`).
+
+### Medium Priority
+
+- Add MCP support for external tool ecosystems.
+- Add skill support for reusable task workflows and domain capabilities.
+
+### Long-term
+
+- Add SQL-backed persistence for sessions/memory indexing and replay analytics.
+- Upgrade oscillation governance from observation to active intervention policies.
 
 ## Release Automation
 

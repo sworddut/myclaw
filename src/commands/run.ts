@@ -1,10 +1,13 @@
 import {Args, Command, Flags} from '@oclif/core'
 import {createInterface} from 'node:readline/promises'
 import {stdin as stdIn, stdout as stdOut} from 'node:process'
+import {loadConfig} from '../config/load-config.js'
 import {runAgentTask, type AgentEvent} from '../core/agent.js'
 import {InMemoryEventBus} from '../core/event-bus.js'
 import {SessionLogSubscriber} from '../core/subscribers/session-log-subscriber.js'
 import {MetricsSubscriber} from '../core/subscribers/metrics-subscriber.js'
+import {UserProfileSubscriber} from '../core/subscribers/user-profile-subscriber.js'
+import {EslintCheckSubscriber} from '../core/subscribers/eslint-check-subscriber.js'
 
 const ANSI = {
   reset: '\x1b[0m',
@@ -43,6 +46,10 @@ function baseEventLine(event: AgentEvent): string {
       return `[${now()}] SUMMARY session=${event.sessionId} range=[${event.from}-${event.to}]`
     case 'context_trim':
       return `[${now()}] CONTEXT_TRIM session=${event.sessionId} dropped_tool_messages=${event.droppedToolMessages} window=${event.windowSize}`
+    case 'write_completed':
+      return `[${now()}] WRITE_COMPLETED step=${event.step} tool=${event.tool} path=${event.path}`
+    case 'check_result':
+      return `[${now()}] CHECK_RESULT step=${event.step} checker=${event.checker} ok=${event.ok} injected=${event.injected} path=${event.path}\n${shorten(event.output)}`
     case 'model_request_start':
       return `[${now()}] MODEL_REQUEST_START step=${event.step}`
     case 'model_response':
@@ -82,17 +89,29 @@ export default class Run extends Command {
 
   public async run(): Promise<void> {
     const {args, flags} = await this.parse(Run)
+    const config = await loadConfig()
     const startedAt = Date.now()
     let lastEventAt = startedAt
     const bus = new InMemoryEventBus<AgentEvent>()
     const sessionLogSubscriber = new SessionLogSubscriber()
     const metricsSubscriber = new MetricsSubscriber()
+    const userProfileSubscriber = new UserProfileSubscriber()
+    const eslintCheckSubscriber = new EslintCheckSubscriber()
     const unsubscribeLog = bus.subscribe((event) => {
       void sessionLogSubscriber.handle(event)
     })
     const unsubscribeMetrics = bus.subscribe((event) => {
       void metricsSubscriber.handle(event)
     })
+    const unsubscribeProfile = bus.subscribe((event) => {
+      void userProfileSubscriber.handle(event)
+    })
+    const eslintEnabled = config.runtime.checks.eslint.enabled
+    const unsubscribeEslint = eslintEnabled
+      ? bus.subscribe((event) => {
+          void eslintCheckSubscriber.handle(event)
+        })
+      : () => {}
     const unsubscribe = flags.quiet
       ? () => {}
       : bus.subscribe((event) => {
@@ -143,10 +162,13 @@ export default class Run extends Command {
         }
       })
     } finally {
-      await Promise.all([sessionLogSubscriber.flush(), metricsSubscriber.flush()])
+      await Promise.all([sessionLogSubscriber.flush(), metricsSubscriber.flush(), userProfileSubscriber.flush()])
+      if (eslintEnabled) await eslintCheckSubscriber.flush()
       unsubscribe()
       unsubscribeLog()
       unsubscribeMetrics()
+      unsubscribeProfile()
+      unsubscribeEslint()
     }
 
     this.log(output)
