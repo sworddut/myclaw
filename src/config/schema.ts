@@ -32,6 +32,12 @@ export const appConfigSchema = z.object({
         })
         .default({})
     })
+    .default({}),
+  review: z
+    .object({
+      enabled: z.boolean().default(true),
+      tools: z.record(z.string(), z.string()).optional()
+    })
     .default({})
 }).transform((config) => ({
   ...config,

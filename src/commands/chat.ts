@@ -88,6 +88,12 @@ function baseEventLine(event: AgentEvent): string {
       return `[${now()}] TOOL_RESULT step=${event.step} tool=${event.tool} ok=${event.ok}\n${shorten(event.output)}`
     case 'oscillation_observe':
       return `[${now()}] OSCILLATION_OBSERVE step=${event.step} window=${event.window} repeat_ratio=${event.repeatRatio} novelty_ratio=${event.noveltyRatio} no_mutation_steps=${event.noMutationSteps} possible=${event.possibleOscillation}`
+    case 'review_start':
+      return `[${now()}] REVIEW_START file=${event.file} linter=${event.linter}`
+    case 'review_pass':
+      return `[${now()}] REVIEW_PASS file=${event.file} linter=${event.linter}`
+    case 'review_fail':
+      return `[${now()}] REVIEW_FAIL file=${event.file} linter=${event.linter}\n${shorten(event.output)}`
     case 'final':
       return `[${now()}] FINAL step=${event.step}\n${shorten(event.content)}`
     case 'max_steps':

@@ -1,5 +1,17 @@
 import {randomUUID} from 'node:crypto'
 import type {ChatMessage, LLMProvider} from '../providers/types.js'
+import {InterruptQueue} from './interrupt-queue.js'
+
+export type InterruptMessage = {
+  role: 'tool'
+  content: string
+  toolName: string
+}
+
+export type ReviewConfig = {
+  enabled: boolean
+  tools?: Record<string, string>
+}
 
 export type SessionSummaryBlock = {
   ts: string
@@ -17,10 +29,12 @@ export type AgentSession = {
     maxSteps: number
     contextWindowSize: number
   }
+  reviewConfig: ReviewConfig
   messages: ChatMessage[]
   summaries: SessionSummaryBlock[]
   compressedCount: number
   readPaths: Set<string>
+  interruptQueue: InterruptQueue<InterruptMessage>
 }
 
 export class InMemorySessionStore {
