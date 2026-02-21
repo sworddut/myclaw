@@ -23,6 +23,7 @@ import {runShell} from '../tools/shell.js'
 import {AgentSession, InMemorySessionStore, type SessionSummaryBlock} from './session-store.js'
 import type {EventBus} from './event-bus.js'
 import {loadUserProfileBrief} from './user-profile.js'
+import {checkGate} from './check-gate.js'
 
 const sessionStore = new InMemorySessionStore()
 const CONTEXT_WINDOW_SIZE = 20
@@ -178,6 +179,17 @@ export type AgentEvent =
     }
   | {type: 'summary'; sessionId: string; from: number; to: number; content: string}
   | {type: 'context_trim'; sessionId: string; droppedToolMessages: number; windowSize: number}
+  | {type: 'write_completed'; sessionId: string; step: number; path: string; tool: 'write_file' | 'apply_patch'}
+  | {
+      type: 'check_result'
+      sessionId: string
+      step: number
+      checker: 'eslint' | 'syntax' | 'python_syntax'
+      path: string
+      ok: boolean
+      output: string
+      injected: boolean
+    }
   | {type: 'model_request_start'; sessionId: string; step: number}
   | {type: 'model_response'; sessionId: string; step: number; content: string}
   | {type: 'tool_call'; sessionId: string; step: number; tool: ToolName; input: Record<string, unknown>}
@@ -497,6 +509,15 @@ function ratio(value: number): number {
 function emitEvent(options: AgentRunOptions, event: AgentEvent): void {
   options.onEvent?.(event)
   options.bus?.publish(event)
+}
+
+function buildCheckToolMessage(checker: 'eslint' | 'syntax' | 'python_syntax', path: string, output: string): string {
+  return `TOOL_RESULT ${JSON.stringify({
+    tool: `${checker}_check`,
+    ok: false,
+    path,
+    output
+  })}`
 }
 
 async function executeTool(
@@ -870,6 +891,34 @@ export async function runAgentTurn(
   emitEvent(options, {type: 'message', sessionId, role: 'user', content: userMessage})
 
   for (let step = 0; step < maxSteps; step += 1) {
+    const pendingCheckFailures = checkGate.popFailures(sessionId)
+    for (const failure of pendingCheckFailures) {
+      const toolContent = buildCheckToolMessage(failure.checker, failure.path, failure.output)
+      session.messages.push({
+        role: 'tool',
+        content: toolContent,
+        toolName: `${failure.checker}_check`
+      })
+      emitEvent(options, {
+        type: 'message',
+        sessionId,
+        role: 'tool',
+        step,
+        content: toolContent,
+        toolName: `${failure.checker}_check`
+      })
+      emitEvent(options, {
+        type: 'check_result',
+        sessionId,
+        step,
+        checker: failure.checker,
+        path: failure.path,
+        ok: false,
+        output: failure.output,
+        injected: true
+      })
+    }
+
     maybeCompressContext(session, options)
     const context = buildContextFromSession(session, contextWindowSize, options)
     emitEvent(options, {type: 'model_request_start', sessionId, step})
@@ -999,6 +1048,13 @@ export async function runAgentTurn(
         stepHasSuccessfulMutation = true
         workspaceVersion += 1
         explorationCounts.clear()
+        emitEvent(options, {
+          type: 'write_completed',
+          sessionId,
+          step,
+          path: String(toolCall.input.path ?? ''),
+          tool: toolCall.tool
+        })
       }
     }
 
