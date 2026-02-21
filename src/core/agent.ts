@@ -22,6 +22,7 @@ import {
 import {runShell} from '../tools/shell.js'
 import {AgentSession, InMemorySessionStore, type SessionSummaryBlock} from './session-store.js'
 import type {EventBus} from './event-bus.js'
+import {loadUserProfileBrief} from './user-profile.js'
 
 const sessionStore = new InMemorySessionStore()
 const CONTEXT_WINDOW_SIZE = 20
@@ -582,8 +583,8 @@ async function executeTool(
   }
 }
 
-function buildSystemPrompt(workspace: string): string {
-  return [
+function buildSystemPrompt(workspace: string, userProfileBrief?: string): string {
+  const lines = [
     `You are a coding agent running in workspace: ${workspace}.`,
     'Use available tools for file/shell operations.',
     'If the model/tooling does not support native tool calling, fallback to JSON:',
@@ -608,7 +609,12 @@ function buildSystemPrompt(workspace: string): string {
     'Use relative paths. Never wrap JSON with extra prose when calling tools.',
     'When finished, return a concise task report only (what changed + key result).',
     'Do not paste full file contents or large code blocks unless the user explicitly asks.'
-  ].join('\n')
+  ]
+  if (userProfileBrief) {
+    lines.push('Cross-project user profile (persistent memory, use as preference/context hints):')
+    lines.push(userProfileBrief)
+  }
+  return lines.join('\n')
 }
 
 function normalizeFinalAssistantText(text: string): string {
@@ -672,7 +678,8 @@ async function resolveRuntime() {
   const resolvedModel = resolveModel(config.model)
   const provider = providerFromConfig(config.provider, resolvedModel, config.baseURL, config.runtime)
   const resolvedBaseURL = nonEmpty(config.baseURL) ?? nonEmpty(process.env.OPENAI_BASE_URL)
-  return {config, resolvedModel, resolvedBaseURL, provider}
+  const userProfileBrief = await loadUserProfileBrief(config.homeDir)
+  return {config, resolvedModel, resolvedBaseURL, userProfileBrief, provider}
 }
 
 export async function listPersistedSessionsForWorkspace(workspace?: string): Promise<PersistedSessionSummary[]> {
@@ -708,9 +715,9 @@ export async function listPersistedSessionsForWorkspace(workspace?: string): Pro
 }
 
 export async function createAgentSession(options: AgentRunOptions = {}): Promise<string> {
-  const {config, resolvedModel, resolvedBaseURL, provider} = await resolveRuntime()
+  const {config, resolvedModel, resolvedBaseURL, userProfileBrief, provider} = await resolveRuntime()
   const workspace = config.workspace
-  const systemPrompt = buildSystemPrompt(workspace)
+  const systemPrompt = buildSystemPrompt(workspace, userProfileBrief)
 
   const sessionsDir = getSessionsDir(config.homeDir)
   const placeholderLogPath = getSessionLogPath('pending', config.homeDir)
@@ -752,7 +759,7 @@ export async function createAgentSession(options: AgentRunOptions = {}): Promise
 export async function resumeAgentSession(sessionId: string, options: AgentRunOptions = {}): Promise<string> {
   if (sessionStore.has(sessionId)) return sessionId
 
-  const {config, resolvedModel, resolvedBaseURL, provider} = await resolveRuntime()
+  const {config, resolvedModel, resolvedBaseURL, userProfileBrief, provider} = await resolveRuntime()
   const workspace = config.workspace
   const logPath = getSessionLogPath(sessionId, config.homeDir)
   const raw = await readFile(logPath, 'utf8')
@@ -808,7 +815,7 @@ export async function resumeAgentSession(sessionId: string, options: AgentRunOpt
   }
 
   if (!restoredMessages.some((message) => message.role === 'system')) {
-    restoredMessages.unshift({role: 'system', content: buildSystemPrompt(workspace)})
+    restoredMessages.unshift({role: 'system', content: buildSystemPrompt(workspace, userProfileBrief)})
   }
 
   sessionStore.restore({
@@ -836,7 +843,9 @@ export async function resumeAgentSession(sessionId: string, options: AgentRunOpt
     workspace,
     sessionId,
     logPath,
-    systemPrompt: restoredMessages.find((message) => message.role === 'system')?.content ?? buildSystemPrompt(workspace)
+    systemPrompt:
+      restoredMessages.find((message) => message.role === 'system')?.content ??
+      buildSystemPrompt(workspace, userProfileBrief)
   })
 
   return sessionId

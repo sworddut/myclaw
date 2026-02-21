@@ -15,6 +15,10 @@ export function getMemoryPath(): string {
   return resolve(getMyclawHome(), 'memory.md')
 }
 
+export function getUserProfilePath(homeDir = getMyclawHome()): string {
+  return resolve(homeDir, 'user-profile.json')
+}
+
 export function getSessionsDir(homeDir = getMyclawHome()): string {
   return resolve(homeDir, 'sessions')
 }

@@ -34,6 +34,8 @@ Runtime priority: env vars > `.myclawrc.json` `runtime` > defaults.
 - Override with env: `MYCLAW_HOME=/custom/path`
 - Global env file: `~/.myclaw/.env`
 - Memory file: `~/.myclaw/memory.md`
+- User profile memory: `~/.myclaw/user-profile.json`
+  - Stores one stable cross-session profile and updates only on high-value signals.
 - Session logs: `~/.myclaw/sessions/<session-id>.jsonl`
 - Metrics logs: `~/.myclaw/metrics/<session-id>.jsonl`
 
