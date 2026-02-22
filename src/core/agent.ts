@@ -22,6 +22,8 @@ import {
 import {runShell} from '../tools/shell.js'
 import {AgentSession, InMemorySessionStore, type SessionSummaryBlock} from './session-store.js'
 import type {EventBus} from './event-bus.js'
+import {loadUserProfileBrief} from './user-profile.js'
+import {checkGate} from './check-gate.js'
 
 const sessionStore = new InMemorySessionStore()
 const CONTEXT_WINDOW_SIZE = 20
@@ -177,6 +179,17 @@ export type AgentEvent =
     }
   | {type: 'summary'; sessionId: string; from: number; to: number; content: string}
   | {type: 'context_trim'; sessionId: string; droppedToolMessages: number; windowSize: number}
+  | {type: 'write_completed'; sessionId: string; step: number; path: string; tool: 'write_file' | 'apply_patch'}
+  | {
+      type: 'check_result'
+      sessionId: string
+      step: number
+      checker: 'eslint' | 'syntax' | 'python_syntax'
+      path: string
+      ok: boolean
+      output: string
+      injected: boolean
+    }
   | {type: 'model_request_start'; sessionId: string; step: number}
   | {type: 'model_response'; sessionId: string; step: number; content: string}
   | {type: 'tool_call'; sessionId: string; step: number; tool: ToolName; input: Record<string, unknown>}
@@ -498,6 +511,15 @@ function emitEvent(options: AgentRunOptions, event: AgentEvent): void {
   options.bus?.publish(event)
 }
 
+function buildCheckToolMessage(checker: 'eslint' | 'syntax' | 'python_syntax', path: string, output: string): string {
+  return `TOOL_RESULT ${JSON.stringify({
+    tool: `${checker}_check`,
+    ok: false,
+    path,
+    output
+  })}`
+}
+
 async function executeTool(
   toolCall: ToolCall,
   session: AgentSession,
@@ -582,8 +604,8 @@ async function executeTool(
   }
 }
 
-function buildSystemPrompt(workspace: string): string {
-  return [
+function buildSystemPrompt(workspace: string, userProfileBrief?: string): string {
+  const lines = [
     `You are a coding agent running in workspace: ${workspace}.`,
     'Use available tools for file/shell operations.',
     'If the model/tooling does not support native tool calling, fallback to JSON:',
@@ -608,7 +630,12 @@ function buildSystemPrompt(workspace: string): string {
     'Use relative paths. Never wrap JSON with extra prose when calling tools.',
     'When finished, return a concise task report only (what changed + key result).',
     'Do not paste full file contents or large code blocks unless the user explicitly asks.'
-  ].join('\n')
+  ]
+  if (userProfileBrief) {
+    lines.push('Cross-project user profile (persistent memory, use as preference/context hints):')
+    lines.push(userProfileBrief)
+  }
+  return lines.join('\n')
 }
 
 function normalizeFinalAssistantText(text: string): string {
@@ -672,7 +699,8 @@ async function resolveRuntime() {
   const resolvedModel = resolveModel(config.model)
   const provider = providerFromConfig(config.provider, resolvedModel, config.baseURL, config.runtime)
   const resolvedBaseURL = nonEmpty(config.baseURL) ?? nonEmpty(process.env.OPENAI_BASE_URL)
-  return {config, resolvedModel, resolvedBaseURL, provider}
+  const userProfileBrief = await loadUserProfileBrief(config.homeDir)
+  return {config, resolvedModel, resolvedBaseURL, userProfileBrief, provider}
 }
 
 export async function listPersistedSessionsForWorkspace(workspace?: string): Promise<PersistedSessionSummary[]> {
@@ -708,9 +736,9 @@ export async function listPersistedSessionsForWorkspace(workspace?: string): Pro
 }
 
 export async function createAgentSession(options: AgentRunOptions = {}): Promise<string> {
-  const {config, resolvedModel, resolvedBaseURL, provider} = await resolveRuntime()
+  const {config, resolvedModel, resolvedBaseURL, userProfileBrief, provider} = await resolveRuntime()
   const workspace = config.workspace
-  const systemPrompt = buildSystemPrompt(workspace)
+  const systemPrompt = buildSystemPrompt(workspace, userProfileBrief)
 
   const sessionsDir = getSessionsDir(config.homeDir)
   const placeholderLogPath = getSessionLogPath('pending', config.homeDir)
@@ -752,7 +780,7 @@ export async function createAgentSession(options: AgentRunOptions = {}): Promise
 export async function resumeAgentSession(sessionId: string, options: AgentRunOptions = {}): Promise<string> {
   if (sessionStore.has(sessionId)) return sessionId
 
-  const {config, resolvedModel, resolvedBaseURL, provider} = await resolveRuntime()
+  const {config, resolvedModel, resolvedBaseURL, userProfileBrief, provider} = await resolveRuntime()
   const workspace = config.workspace
   const logPath = getSessionLogPath(sessionId, config.homeDir)
   const raw = await readFile(logPath, 'utf8')
@@ -808,7 +836,7 @@ export async function resumeAgentSession(sessionId: string, options: AgentRunOpt
   }
 
   if (!restoredMessages.some((message) => message.role === 'system')) {
-    restoredMessages.unshift({role: 'system', content: buildSystemPrompt(workspace)})
+    restoredMessages.unshift({role: 'system', content: buildSystemPrompt(workspace, userProfileBrief)})
   }
 
   sessionStore.restore({
@@ -836,7 +864,9 @@ export async function resumeAgentSession(sessionId: string, options: AgentRunOpt
     workspace,
     sessionId,
     logPath,
-    systemPrompt: restoredMessages.find((message) => message.role === 'system')?.content ?? buildSystemPrompt(workspace)
+    systemPrompt:
+      restoredMessages.find((message) => message.role === 'system')?.content ??
+      buildSystemPrompt(workspace, userProfileBrief)
   })
 
   return sessionId
@@ -861,6 +891,34 @@ export async function runAgentTurn(
   emitEvent(options, {type: 'message', sessionId, role: 'user', content: userMessage})
 
   for (let step = 0; step < maxSteps; step += 1) {
+    const pendingCheckFailures = checkGate.popFailures(sessionId)
+    for (const failure of pendingCheckFailures) {
+      const toolContent = buildCheckToolMessage(failure.checker, failure.path, failure.output)
+      session.messages.push({
+        role: 'tool',
+        content: toolContent,
+        toolName: `${failure.checker}_check`
+      })
+      emitEvent(options, {
+        type: 'message',
+        sessionId,
+        role: 'tool',
+        step,
+        content: toolContent,
+        toolName: `${failure.checker}_check`
+      })
+      emitEvent(options, {
+        type: 'check_result',
+        sessionId,
+        step,
+        checker: failure.checker,
+        path: failure.path,
+        ok: false,
+        output: failure.output,
+        injected: true
+      })
+    }
+
     maybeCompressContext(session, options)
     const context = buildContextFromSession(session, contextWindowSize, options)
     emitEvent(options, {type: 'model_request_start', sessionId, step})
@@ -990,6 +1048,13 @@ export async function runAgentTurn(
         stepHasSuccessfulMutation = true
         workspaceVersion += 1
         explorationCounts.clear()
+        emitEvent(options, {
+          type: 'write_completed',
+          sessionId,
+          step,
+          path: String(toolCall.input.path ?? ''),
+          tool: toolCall.tool
+        })
       }
     }
 
