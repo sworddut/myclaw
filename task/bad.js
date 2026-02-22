@@ -1,3 +1,2 @@
-function test() {
-  console.log('This is a test';
-}
+function exampleFunction() {
+    console.log('This is an example without a closing parenthesis'

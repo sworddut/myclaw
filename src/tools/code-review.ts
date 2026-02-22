@@ -114,6 +114,27 @@ function linterForFile(file: string, tools?: Record<string, string>): string | u
   return PER_FILE_LINTERS[ext]
 }
 
+async function runJsSyntaxCheck(filePath: string, workspace: string): Promise<ReviewResult | null> {
+  const ext = extname(filePath).toLowerCase()
+  if (!['.js', '.mjs', '.cjs'].includes(ext)) return null
+
+  try {
+    const {stdout, stderr, exitCode} = await execa('node', ['--check', filePath], {
+      cwd: workspace,
+      reject: false,
+    })
+    if (exitCode === 0) return null
+    const output = [stdout, stderr].filter(Boolean).join('\n').trim()
+    return {
+      file: filePath,
+      linter: 'node_syntax',
+      output: output || 'node --check failed'
+    }
+  } catch {
+    return null
+  }
+}
+
 /**
  * Run lint on `filePath` asynchronously.
  *
@@ -131,6 +152,10 @@ export async function runCodeReview(
   config?: ReviewConfig
 ): Promise<ReviewResult | null> {
   if (config && !config.enabled) return null
+
+  // Always run lightweight syntax checks first to avoid false "pass" when lint infra is missing.
+  const jsSyntaxFail = await runJsSyntaxCheck(filePath, workspace)
+  if (jsSyntaxFail) return jsSyntaxFail
 
   // 1. User-configured per-extension override
   const ext = extname(filePath).toLowerCase()

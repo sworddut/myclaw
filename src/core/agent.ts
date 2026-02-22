@@ -1091,7 +1091,6 @@ export async function runAgentTurn(
                 toolName: 'code_review',
               }
             }
-            emitEvent(options, {type: 'review_pass', sessionId, file: filePath, linter: 'auto'})
             return null
           })
           session.interruptQueue.enqueue(reviewPromise)
