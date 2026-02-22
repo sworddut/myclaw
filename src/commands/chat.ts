@@ -211,13 +211,16 @@ export default class Chat extends Command {
 
       this.log(cyan('myclaw chat started. Type /help for commands.'))
 
+      rl.on('SIGINT', () => {
+        this.log(cyan('\nInterrupted. Type /exit to quit.'))
+      })
+
       while (true) {
         let input = ''
         try {
           input = (await rl.question(cyan('you> '))).trim()
         } catch {
-          this.log(cyan('\nInterrupted. Type /exit to quit.'))
-          continue
+          break
         }
 
         if (!input) continue
