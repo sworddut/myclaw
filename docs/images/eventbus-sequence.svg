@@ -1,0 +1,121 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1080" viewBox="0 0 1600 1080" role="img" aria-labelledby="title desc">
+  <title id="title">myclaw event bus sequence</title>
+  <desc id="desc">Sequence diagram of one agent turn with event publish, subscriber handling, and check feedback injection.</desc>
+  <defs>
+    <style>
+      .bg { fill: #f8f7f3; }
+      .title { font: 700 34px 'Georgia', 'Times New Roman', serif; fill: #1f2937; }
+      .subtitle { font: 400 18px 'Georgia', 'Times New Roman', serif; fill: #4b5563; }
+      .actor { fill: #fffdf8; stroke: #5f6774; stroke-width: 2; rx: 12; ry: 12; }
+      .actorCore { fill: #edf4ff; stroke: #3f618f; stroke-width: 2.2; rx: 12; ry: 12; }
+      .actorBus { fill: #fef9ec; stroke: #8c6d2f; stroke-width: 2.2; rx: 12; ry: 12; }
+      .actorSub { fill: #eef8ef; stroke: #4f7c55; stroke-width: 2.1; rx: 12; ry: 12; }
+      .actorGate { fill: #f6effb; stroke: #6f568e; stroke-width: 2.1; rx: 12; ry: 12; }
+      .name { font: 700 15px 'Menlo', 'Consolas', monospace; fill: #1f2937; }
+      .lane { stroke: #9aa3b2; stroke-width: 1.6; stroke-dasharray: 7 7; }
+      .msg { stroke: #334155; stroke-width: 2; fill: none; }
+      .msgSoft { stroke: #5f6f83; stroke-width: 1.8; fill: none; }
+      .ret { stroke: #607187; stroke-width: 1.6; fill: none; stroke-dasharray: 6 5; }
+      .txt { font: 400 14px 'Georgia', 'Times New Roman', serif; fill: #273244; }
+      .step { font: 700 13px 'Menlo', 'Consolas', monospace; fill: #111827; }
+      .phase { fill: #f2f4f8; stroke: #a9b0bc; stroke-width: 1.3; rx: 10; ry: 10; }
+      .note { font: 400 13px 'Georgia', 'Times New Roman', serif; fill: #4b5563; }
+    </style>
+    <marker id="arrow" markerWidth="11" markerHeight="11" refX="9" refY="5.5" orient="auto-start-reverse">
+      <path d="M1,1 L10,5.5 L1,10 Z" fill="#334155"/>
+    </marker>
+    <marker id="arrowSoft" markerWidth="11" markerHeight="11" refX="9" refY="5.5" orient="auto-start-reverse">
+      <path d="M1,1 L10,5.5 L1,10 Z" fill="#5f6f83"/>
+    </marker>
+  </defs>
+
+  <rect class="bg" x="0" y="0" width="1600" height="1080"/>
+
+  <text class="title" x="64" y="72">myclaw EventBus Sequence (One Typical Turn)</text>
+  <text class="subtitle" x="64" y="102">Clean naming: run/chat -> agent -> event_bus -> subscribers, with check feedback injected into next turn.</text>
+
+  <rect class="phase" x="54" y="146" width="1490" height="74"/>
+  <text class="note" x="78" y="176">Lifelines</text>
+
+  <rect class="actor" x="78" y="166" width="150" height="42"/>
+  <text class="name" x="96" y="193">run_or_chat</text>
+
+  <rect class="actorCore" x="288" y="166" width="150" height="42"/>
+  <text class="name" x="324" y="193">agent</text>
+
+  <rect class="actorBus" x="498" y="166" width="150" height="42"/>
+  <text class="name" x="517" y="193">event_bus</text>
+
+  <rect class="actorSub" x="708" y="166" width="170" height="42"/>
+  <text class="name" x="723" y="193">session_log_sub</text>
+
+  <rect class="actorSub" x="938" y="166" width="160" height="42"/>
+  <text class="name" x="960" y="193">metrics_sub</text>
+
+  <rect class="actorSub" x="1158" y="166" width="170" height="42"/>
+  <text class="name" x="1171" y="193">eslint_check_sub</text>
+
+  <rect class="actorGate" x="1388" y="166" width="130" height="42"/>
+  <text class="name" x="1410" y="193">check_gate</text>
+
+  <line class="lane" x1="153" y1="218" x2="153" y2="980"/>
+  <line class="lane" x1="363" y1="218" x2="363" y2="980"/>
+  <line class="lane" x1="573" y1="218" x2="573" y2="980"/>
+  <line class="lane" x1="793" y1="218" x2="793" y2="980"/>
+  <line class="lane" x1="1018" y1="218" x2="1018" y2="980"/>
+  <line class="lane" x1="1243" y1="218" x2="1243" y2="980"/>
+  <line class="lane" x1="1453" y1="218" x2="1453" y2="980"/>
+
+  <rect class="phase" x="54" y="244" width="1490" height="310"/>
+  <text class="step" x="72" y="271">Phase A: Start + standard turn events</text>
+
+  <path class="msg" d="M153 300 L363 300" marker-end="url(#arrow)"/>
+  <text class="txt" x="176" y="292">1. run_agent_turn(user_input)</text>
+
+  <path class="msg" d="M363 340 L573 340" marker-end="url(#arrow)"/>
+  <text class="txt" x="383" y="332">2. publish(start / message / model_request_start)</text>
+
+  <path class="msgSoft" d="M573 378 L793 378" marker-end="url(#arrowSoft)"/>
+  <path class="msgSoft" d="M573 406 L1018 406" marker-end="url(#arrowSoft)"/>
+  <path class="msgSoft" d="M573 434 L1243 434" marker-end="url(#arrowSoft)"/>
+  <text class="txt" x="595" y="370">3. fan-out event to subscribers</text>
+
+  <path class="ret" d="M793 462 L573 462" marker-end="url(#arrowSoft)"/>
+  <text class="txt" x="610" y="454">write session log</text>
+
+  <path class="ret" d="M1018 490 L573 490" marker-end="url(#arrowSoft)"/>
+  <text class="txt" x="725" y="482">record metrics</text>
+
+  <path class="msg" d="M363 526 L153 526" marker-end="url(#arrow)"/>
+  <text class="txt" x="172" y="518">4. return assistant output</text>
+
+  <rect class="phase" x="54" y="578" width="1490" height="250"/>
+  <text class="step" x="72" y="605">Phase B: Async check path (only after write_completed)</text>
+
+  <path class="msg" d="M363 640 L573 640" marker-end="url(#arrow)"/>
+  <text class="txt" x="386" y="632">5. publish(write_completed)</text>
+
+  <path class="msgSoft" d="M573 676 L1243 676" marker-end="url(#arrowSoft)"/>
+  <text class="txt" x="850" y="668">6. eslint_check_sub.handle(write_completed)</text>
+
+  <path class="msgSoft" d="M1243 714 L1453 714" marker-end="url(#arrowSoft)"/>
+  <text class="txt" x="1270" y="706">7. push failure (if any)</text>
+
+  <path class="ret" d="M1453 748 L1243 748" marker-end="url(#arrowSoft)"/>
+  <text class="txt" x="1298" y="740">ack</text>
+
+  <rect class="phase" x="54" y="850" width="1490" height="132"/>
+  <text class="step" x="72" y="877">Phase C: Next turn feedback injection</text>
+
+  <path class="msg" d="M363 910 L1453 910" marker-end="url(#arrow)"/>
+  <text class="txt" x="756" y="902">8. pop_failures(session_id)</text>
+
+  <path class="msg" d="M363 944 L573 944" marker-end="url(#arrow)"/>
+  <text class="txt" x="386" y="936">9. publish(check_result + tool_result injection)</text>
+
+  <path class="msgSoft" d="M573 970 L793 970" marker-end="url(#arrowSoft)"/>
+  <path class="msgSoft" d="M573 970 L1018 970" marker-end="url(#arrowSoft)"/>
+  <text class="txt" x="598" y="962">10. subscribers persist and observe feedback loop</text>
+
+  <text class="note" x="64" y="1036">Figure: Sequence derived from src/commands/run.ts, src/commands/chat.ts, src/core/agent.ts, and src/core/subscribers/eslint-check-subscriber.ts.</text>
+</svg>

@@ -159,6 +159,19 @@ src/config/         # config loader + schema
 test/               # tests
 ```
 
+## EventBus Architecture
+
+The runtime uses an event-driven design: the agent publishes typed `AgentEvent`s into `InMemoryEventBus`, and command-level subscribers consume events independently for logging, metrics, user profile updates, and async code checks.
+
+![myclaw event-driven architecture](docs/images/eventbus-architecture.svg)
+
+## EventBus Sequence
+
+A typical turn sequence (including async `write_completed` checks and next-turn feedback injection):
+
+![myclaw eventbus sequence](docs/images/eventbus-sequence.jpg)
+
+
 ## Roadmap
 
 Current strategy: **feature first, optimization after baseline capability is complete**.

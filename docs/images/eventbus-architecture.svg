@@ -1,0 +1,112 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="980" viewBox="0 0 1600 980" role="img" aria-labelledby="title desc">
+  <title id="title">myclaw event bus architecture</title>
+  <desc id="desc">Paper style architecture diagram showing Agent publishing events to EventBus and subscribers consuming events.</desc>
+  <defs>
+    <style>
+      .bg { fill: #f8f7f3; }
+      .title { font: 700 36px 'Georgia', 'Times New Roman', serif; fill: #20232a; }
+      .subtitle { font: 400 19px 'Georgia', 'Times New Roman', serif; fill: #4c5563; }
+      .h1 { font: 700 20px 'Georgia', 'Times New Roman', serif; fill: #1f2937; }
+      .body { font: 400 16px 'Georgia', 'Times New Roman', serif; fill: #273244; }
+      .mono { font: 600 15px 'Menlo', 'Consolas', monospace; fill: #1f2937; }
+      .box { fill: #fffdf8; stroke: #616b7a; stroke-width: 2.1; rx: 14; ry: 14; }
+      .bus { fill: #fef9ec; stroke: #8d6d2f; stroke-width: 2.3; rx: 18; ry: 18; }
+      .publisher { fill: #edf4ff; stroke: #3e5f8a; stroke-width: 2.3; rx: 16; ry: 16; }
+      .subscriber { fill: #eef8ef; stroke: #4d7b53; stroke-width: 2.2; rx: 14; ry: 14; }
+      .sink { fill: #f6effb; stroke: #70558f; stroke-width: 2.1; rx: 14; ry: 14; }
+      .edge { stroke: #3c4b62; stroke-width: 2.2; fill: none; }
+      .edge-soft { stroke: #677489; stroke-width: 1.8; fill: none; stroke-dasharray: 8 7; }
+      .legend { fill: #fffdf8; stroke: #7d8490; stroke-width: 1.6; rx: 12; ry: 12; }
+      .note { font: 400 14px 'Georgia', 'Times New Roman', serif; fill: #4b5667; }
+    </style>
+    <marker id="arrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto-start-reverse">
+      <path d="M1,1 L11,6 L1,11 Z" fill="#3c4b62"/>
+    </marker>
+    <marker id="arrowSoft" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto-start-reverse">
+      <path d="M1,1 L11,6 L1,11 Z" fill="#677489"/>
+    </marker>
+  </defs>
+
+  <rect class="bg" x="0" y="0" width="1600" height="980"/>
+
+  <text class="title" x="74" y="80">myclaw Event-Driven Runtime Architecture</text>
+  <text class="subtitle" x="74" y="114">Agent publishes typed runtime events; independent subscribers consume through InMemoryEventBus.</text>
+
+  <rect class="publisher" x="82" y="190" width="380" height="250"/>
+  <text class="h1" x="108" y="228">Publisher</text>
+  <text class="mono" x="108" y="263">src/core/agent.ts</text>
+  <text class="body" x="108" y="298">runAgentTurn / createAgentSession</text>
+  <text class="body" x="108" y="326">emitEvent(...) -> options.bus.publish(event)</text>
+  <text class="body" x="108" y="360">events: start, message, tool_call,</text>
+  <text class="body" x="108" y="387">tool_result, write_completed, check_result, ...</text>
+
+  <rect class="bus" x="550" y="246" width="470" height="138"/>
+  <text class="h1" x="585" y="296">Event Hub</text>
+  <text class="mono" x="585" y="328">src/core/event-bus.ts :: InMemoryEventBus&lt;AgentEvent&gt;</text>
+  <text class="body" x="585" y="358">publish(event) fan-out to all subscribed handlers</text>
+
+  <path class="edge" d="M462 315 L550 315" marker-end="url(#arrow)"/>
+  <text class="note" x="472" y="297">publish()</text>
+
+  <rect class="box" x="82" y="502" width="938" height="350"/>
+  <text class="h1" x="108" y="542">Subscribers (registered in CLI commands)</text>
+  <text class="mono" x="108" y="570">src/commands/run.ts &amp; src/commands/chat.ts</text>
+
+  <rect class="subscriber" x="108" y="598" width="265" height="106"/>
+  <text class="mono" x="124" y="634">SessionLogSubscriber</text>
+  <text class="body" x="124" y="661">persist message/summary</text>
+  <text class="body" x="124" y="684">~/.myclaw/sessions/*.jsonl</text>
+
+  <rect class="subscriber" x="394" y="598" width="265" height="106"/>
+  <text class="mono" x="410" y="634">MetricsSubscriber</text>
+  <text class="body" x="410" y="661">collect runtime metrics</text>
+  <text class="body" x="410" y="684">~/.myclaw/metrics/*.jsonl</text>
+
+  <rect class="subscriber" x="680" y="598" width="314" height="106"/>
+  <text class="mono" x="696" y="634">UserProfileSubscriber</text>
+  <text class="body" x="696" y="661">extract preference signals</text>
+  <text class="body" x="696" y="684">update ~/.myclaw/user-profile.json</text>
+
+  <rect class="subscriber" x="108" y="724" width="378" height="106"/>
+  <text class="mono" x="124" y="760">EslintCheckSubscriber (optional)</text>
+  <text class="body" x="124" y="787">on write_completed -> syntax/eslint checks</text>
+  <text class="body" x="124" y="810">push failure into checkGate for next turn</text>
+
+  <rect class="subscriber" x="507" y="724" width="487" height="106"/>
+  <text class="mono" x="523" y="760">CLI Debug/Console Subscriber (quiet=false)</text>
+  <text class="body" x="523" y="787">print non-message events for runtime visibility</text>
+  <text class="body" x="523" y="810">(MODEL_REQUEST_START, TOOL_CALL, CHECK_RESULT...)</text>
+
+  <path class="edge" d="M785 384 L785 462 L250 462 L250 598" marker-end="url(#arrow)"/>
+  <path class="edge" d="M800 384 L800 474 L526 474 L526 598" marker-end="url(#arrow)"/>
+  <path class="edge" d="M815 384 L815 486 L837 486 L837 598" marker-end="url(#arrow)"/>
+  <path class="edge" d="M830 384 L830 500 L297 500 L297 724" marker-end="url(#arrow)"/>
+  <path class="edge" d="M845 384 L845 512 L750 512 L750 724" marker-end="url(#arrow)"/>
+
+  <rect class="sink" x="1070" y="544" width="460" height="286"/>
+  <text class="h1" x="1100" y="584">Side Effects / Persistence</text>
+  <text class="body" x="1100" y="617">1. Session JSONL logs</text>
+  <text class="body" x="1100" y="648">2. Metrics timeline records</text>
+  <text class="body" x="1100" y="679">3. Stable cross-session user profile</text>
+  <text class="body" x="1100" y="710">4. Soft-gate check feedback loop</text>
+  <text class="note" x="1100" y="752">Subscribers are independent; failures are isolated</text>
+  <text class="note" x="1100" y="776">(handler exceptions never break runtime)</text>
+
+  <path class="edge-soft" d="M373 651 L1070 624" marker-end="url(#arrowSoft)"/>
+  <path class="edge-soft" d="M659 651 L1070 653" marker-end="url(#arrowSoft)"/>
+  <path class="edge-soft" d="M994 651 L1070 682" marker-end="url(#arrowSoft)"/>
+  <path class="edge-soft" d="M486 777 L1070 711" marker-end="url(#arrowSoft)"/>
+
+  <rect class="legend" x="1070" y="190" width="460" height="250"/>
+  <text class="h1" x="1100" y="230">Legend</text>
+  <rect class="publisher" x="1100" y="252" width="56" height="30"/>
+  <text class="body" x="1170" y="273">Publisher module</text>
+  <rect class="bus" x="1100" y="300" width="56" height="30"/>
+  <text class="body" x="1170" y="321">Event bus core</text>
+  <rect class="subscriber" x="1100" y="348" width="56" height="30"/>
+  <text class="body" x="1170" y="369">Subscriber module</text>
+  <path class="edge" d="M1100 406 L1156 406" marker-end="url(#arrow)"/>
+  <text class="body" x="1170" y="411">event delivery path</text>
+
+  <text class="note" x="74" y="925">Figure: Runtime event flow implemented by src/core/agent.ts, src/core/event-bus.ts, and command-level subscriber registration.</text>
+</svg>
