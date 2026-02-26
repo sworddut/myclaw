@@ -27,5 +27,5 @@ export type ProviderResponse = {
 
 export interface LLMProvider {
   readonly name: string
-  chat(messages: ChatMessage[], tools?: ProviderToolDefinition[]): Promise<ProviderResponse>
+  chat(messages: ChatMessage[], tools?: ProviderToolDefinition[], signal?: AbortSignal): Promise<ProviderResponse>
 }

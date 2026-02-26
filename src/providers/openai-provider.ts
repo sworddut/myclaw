@@ -110,21 +110,35 @@ export class OpenAIProvider implements LLMProvider {
     })
   }
 
-  private async createWithTimeout(request: ChatCompletionCreateParamsNonStreaming) {
+  private async createWithTimeout(request: ChatCompletionCreateParamsNonStreaming, signal?: AbortSignal) {
+    let timeoutId: ReturnType<typeof setTimeout> | undefined
     const timeoutPromise = new Promise<never>((_, reject) => {
-      const id = setTimeout(() => {
+      timeoutId = setTimeout(() => {
         reject(new Error(`Model request timed out after ${this.timeoutMs}ms`))
       }, this.timeoutMs)
-      // Prevent timers from keeping process alive on some runtimes.
-      id.unref?.()
+      timeoutId.unref?.()
     })
-
-    return (await Promise.race([this.client.chat.completions.create(request), timeoutPromise])) as Awaited<
-      ReturnType<OpenAI['chat']['completions']['create']>
-    >
+    const abortPromise = new Promise<never>((_, reject) => {
+      if (!signal) return
+      const onAbort = () => reject(new Error('Model request aborted by user'))
+      if (signal.aborted) {
+        onAbort()
+        return
+      }
+      signal.addEventListener('abort', onAbort, {once: true})
+    })
+    try {
+      return (await Promise.race([
+        this.client.chat.completions.create(request, signal ? {signal} : undefined),
+        timeoutPromise,
+        abortPromise
+      ])) as Awaited<ReturnType<OpenAI['chat']['completions']['create']>>
+    } finally {
+      if (timeoutId) clearTimeout(timeoutId)
+    }
   }
 
-  async chat(messages: ChatMessage[], tools: ProviderToolDefinition[] = []): Promise<ProviderResponse> {
+  async chat(messages: ChatMessage[], tools: ProviderToolDefinition[] = [], signal?: AbortSignal): Promise<ProviderResponse> {
     const mappedMessages: ChatCompletionMessageParam[] = messages.map((message, index) => {
       if (message.role === 'tool') {
         if (message.toolCallId) {
@@ -185,8 +199,14 @@ export class OpenAIProvider implements LLMProvider {
 
     let lastError: unknown
     for (let attempt = 0; attempt <= this.retryCount; attempt += 1) {
+      if (signal?.aborted) {
+        return {
+          text: 'Interrupted by user.',
+          toolCalls: []
+        }
+      }
       try {
-        const completion = await this.createWithTimeout(request)
+        const completion = await this.createWithTimeout(request, signal)
         const content = extractText(completion)
         const toolCalls = parseToolCalls(completion)
         if (!content && toolCalls.length === 0) {
@@ -199,6 +219,13 @@ export class OpenAIProvider implements LLMProvider {
         }
       } catch (error) {
         lastError = error
+        const message = error instanceof Error ? error.message : String(error)
+        if (/aborted by user/i.test(message)) {
+          return {
+            text: 'Interrupted by user.',
+            toolCalls: []
+          }
+        }
       }
     }
 

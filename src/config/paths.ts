@@ -34,3 +34,12 @@ export function getMetricsDir(homeDir = getMyclawHome()): string {
 export function getMetricsLogPath(sessionId: string, homeDir = getMyclawHome()): string {
   return resolve(getMetricsDir(homeDir), `${sessionId}.jsonl`)
 }
+
+export function getToolLogsDir(homeDir = getMyclawHome()): string {
+  return resolve(homeDir, 'tool-logs')
+}
+
+export function getToolLogPath(sessionId: string, step: number, tool: string, homeDir = getMyclawHome()): string {
+  const safeTool = tool.replace(/[^a-zA-Z0-9_-]/g, '_')
+  return resolve(getToolLogsDir(homeDir), `${sessionId}-step${step}-${safeTool}.log`)
+}

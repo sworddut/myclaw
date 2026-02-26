@@ -9,7 +9,7 @@ import type {
   ProviderToolCall,
   ProviderToolDefinition
 } from '../providers/types.js'
-import {getSessionLogPath, getSessionsDir} from '../config/paths.js'
+import {getSessionLogPath, getSessionsDir, getToolLogPath} from '../config/paths.js'
 import {
   applyTextPatch,
   fileExists,
@@ -192,6 +192,22 @@ export type AgentEvent =
     }
   | {type: 'model_request_start'; sessionId: string; step: number}
   | {type: 'model_response'; sessionId: string; step: number; content: string}
+  | {
+      type: 'tool_stream'
+      sessionId: string
+      step: number
+      tool: ToolName
+      stream: 'stdout' | 'stderr'
+      chunk: string
+    }
+  | {
+      type: 'tool_progress'
+      sessionId: string
+      step: number
+      tool: ToolName
+      message: string
+      elapsedMs: number
+    }
   | {type: 'tool_call'; sessionId: string; step: number; tool: ToolName; input: Record<string, unknown>}
   | {type: 'tool_result'; sessionId: string; step: number; tool: ToolName; ok: boolean; output: string}
   | {
@@ -212,6 +228,7 @@ type AgentRunOptions = {
   bus?: EventBus<AgentEvent>
   maxSteps?: number
   contextWindowSize?: number
+  abortSignal?: AbortSignal
   onSensitiveAction?: (request: {tool: ToolName; command: string}) => Promise<boolean> | boolean
 }
 
@@ -457,6 +474,27 @@ function shellDangerRejectedError(command: string): string {
   return `run_shell rejected: destructive command blocked. command=${command}`
 }
 
+function nonInteractiveShellRejectedError(command: string, reason: string, suggestion: string): string {
+  return `run_shell rejected: ${reason}\ncommand=${command}\nsuggestion=${suggestion}`
+}
+
+function validateNonInteractiveShellCommand(command: string): {ok: true} | {ok: false; reason: string; suggestion: string} {
+  const trimmed = command.trim()
+  if (/create-next-app/.test(trimmed)) {
+    const hasYes = /\s--yes(\s|$)/.test(trimmed)
+    const hasCi = /(^|\s)CI=1(\s|$)/.test(trimmed)
+    if (!hasYes && !hasCi) {
+      return {
+        ok: false,
+        reason: 'create-next-app may enter interactive prompts without non-interactive flags',
+        suggestion:
+          'Use CI=1 and/or --yes, for example: CI=1 npx create-next-app@latest hello-next --yes --js --no-tailwind --no-eslint --app --no-src-dir --import-alias "@/*" --use-npm --skip-install'
+      }
+    }
+  }
+  return {ok: true}
+}
+
 function normalizeWriteContent(content: string): string {
   // Tool-call JSON may decode "\r" and some "\n" escapes into raw control chars.
   // Convert them back to escaped sequences to keep source files syntactically stable.
@@ -520,10 +558,19 @@ function buildCheckToolMessage(checker: 'eslint' | 'syntax' | 'python_syntax', p
   })}`
 }
 
+function summarizeShellOutput(stdout: string, stderr: string): string {
+  const merged = [stdout, stderr].filter(Boolean).join('\n').trim()
+  if (!merged) return '(no output)'
+  const lines = merged.split('\n').filter(Boolean)
+  const tail = lines.slice(-20).join('\n')
+  return tail.length > 1200 ? `${tail.slice(-1200)}\n...[truncated]` : tail
+}
+
 async function executeTool(
   toolCall: ToolCall,
   session: AgentSession,
-  options: AgentRunOptions
+  options: AgentRunOptions,
+  step: number
 ): Promise<{ok: boolean; output: string}> {
   try {
     switch (toolCall.tool) {
@@ -585,14 +632,74 @@ async function executeTool(
 
       case 'run_shell': {
         const command = String(toolCall.input.command ?? '')
+        const nonInteractiveCheck = validateNonInteractiveShellCommand(command)
+        if (!nonInteractiveCheck.ok) {
+          return {
+            ok: false,
+            output: nonInteractiveShellRejectedError(
+              command,
+              nonInteractiveCheck.reason,
+              nonInteractiveCheck.suggestion
+            )
+          }
+        }
         if (looksDestructiveCommand(command)) {
           const approved = (await options.onSensitiveAction?.({tool: 'run_shell', command})) ?? false
           if (!approved) {
             return {ok: false, output: shellDangerRejectedError(command)}
           }
         }
-        const output = await runShell(command, session.workspace)
-        return {ok: true, output}
+        const startedAt = Date.now()
+        const shortCommand = command.length > 80 ? `${command.slice(0, 80)}...` : command
+        const interval = setInterval(() => {
+          emitEvent(options, {
+            type: 'tool_progress',
+            sessionId: session.id,
+            step,
+            tool: 'run_shell',
+            message: `run_shell still running: ${shortCommand}`,
+            elapsedMs: Date.now() - startedAt
+          })
+        }, 5000)
+        interval.unref?.()
+        try {
+          const logPath = getToolLogPath(session.id, step, 'run_shell')
+          const shellResult = await runShell(command, session.workspace, {
+            signal: options.abortSignal,
+            logPath,
+            onStreamChunk: (stream, chunk) => {
+              emitEvent(options, {
+                type: 'tool_stream',
+                sessionId: session.id,
+                step,
+                tool: 'run_shell',
+                stream,
+                chunk
+              })
+            }
+          })
+
+          if (shellResult.aborted) {
+            if (shellResult.interactivePromptDetected) {
+              return {
+                ok: false,
+                output:
+                  `exit_code=130\n(interactive prompt detected; command aborted)\n` +
+                  `Please ask the user to run this command manually in terminal and share results.\n` +
+                  `log_path=${logPath}`
+              }
+            }
+            return {ok: false, output: `exit_code=130\n(aborted by user)\nlog_path=${logPath}`}
+          }
+
+          const preview = summarizeShellOutput(shellResult.stdout, shellResult.stderr)
+          return {
+            ok: shellResult.exitCode === 0,
+            output: `exit_code=${shellResult.exitCode}\nlog_path=${logPath}\noutput_preview_tail:\n${preview}`
+          }
+        } finally {
+          clearInterval(interval)
+        }
       }
 
       default:
@@ -624,6 +731,8 @@ function buildSystemPrompt(workspace: string, userProfileBrief?: string): string
     '- Destructive shell commands (e.g., rm/rmdir/unlink/del/git reset --hard/git clean) are sensitive and need approval.',
     '- You may call multiple read_file tools in one response.',
     '- At most one mutation tool (write_file or apply_patch) per response.',
+    '- run_shell commands MUST be non-interactive. Prefer flags/env like --yes/--no-*/CI=1 to avoid prompts.',
+    '- If a command may become interactive and required options are unknown, ask the user for those parameters before calling run_shell.',
     '- Avoid repeated or equivalent exploration on the same path without new evidence.',
     '- If two consecutive exploration steps add little new information, stop and switch strategy.',
     '- For greetings, casual chat, or meta questions, do NOT call tools; answer directly.',
@@ -667,6 +776,15 @@ function buildContextFromSession(session: AgentSession, windowSize: number, opti
   // context always begins with a valid message.
   let trimIdx = 0
   while (trimIdx < recent.length && recent[trimIdx].role === 'tool') {
+    trimIdx += 1
+  }
+  // Some OpenAI-compatible providers require an assistant function-call turn
+  // to be preceded by user/tool. If window trimming leaves such assistant
+  // messages at the front, drop them to keep request sequence valid.
+  while (trimIdx < recent.length) {
+    const head = recent[trimIdx]
+    if (!head || head.role !== 'assistant') break
+    if (!Array.isArray(head.toolCalls) || head.toolCalls.length === 0) break
     trimIdx += 1
   }
   if (trimIdx > 0) {
@@ -891,6 +1009,9 @@ export async function runAgentTurn(
   emitEvent(options, {type: 'message', sessionId, role: 'user', content: userMessage})
 
   for (let step = 0; step < maxSteps; step += 1) {
+    if (options.abortSignal?.aborted) {
+      return 'Interrupted by user.'
+    }
     const pendingCheckFailures = checkGate.popFailures(sessionId)
     for (const failure of pendingCheckFailures) {
       const toolContent = buildCheckToolMessage(failure.checker, failure.path, failure.output)
@@ -922,8 +1043,11 @@ export async function runAgentTurn(
     maybeCompressContext(session, options)
     const context = buildContextFromSession(session, contextWindowSize, options)
     emitEvent(options, {type: 'model_request_start', sessionId, step})
-    const providerResponse = await session.provider.chat(context, TOOL_DEFINITIONS)
+    const providerResponse = await session.provider.chat(context, TOOL_DEFINITIONS, options.abortSignal)
     const assistantText = normalizeFinalAssistantText(providerResponse.text)
+    if (options.abortSignal?.aborted || assistantText === 'Interrupted by user.') {
+      return 'Interrupted by user.'
+    }
     const nativeCalls = normalizeProviderToolCalls(providerResponse.toolCalls)
     emitEvent(options, {type: 'model_response', sessionId, step, content: assistantText})
     session.messages.push({
@@ -1014,7 +1138,7 @@ export async function runAgentTurn(
       }
 
       emitEvent(options, {type: 'tool_call', sessionId, step, tool: toolCall.tool, input: toolCall.input})
-      const result = await executeTool(toolCall, session, options)
+      const result = await executeTool(toolCall, session, options, step)
       recentCallSignatures.push(signature)
       if (recentCallSignatures.length > metricsWindow) recentCallSignatures.shift()
       recentOutputFingerprints.push(normalizeOutputForNovelty(result.output))
