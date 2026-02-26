@@ -84,6 +84,10 @@ function baseEventLine(event: AgentEvent): string {
       return `[${now()}] MODEL_RESPONSE step=${event.step}\n${shorten(event.content)}`
     case 'tool_call':
       return `[${now()}] TOOL_CALL step=${event.step} tool=${event.tool} input=${JSON.stringify(event.input)}`
+    case 'tool_stream':
+      return `[${now()}] TOOL_STREAM step=${event.step} tool=${event.tool} stream=${event.stream}\n${shorten(event.chunk, 400)}`
+    case 'tool_progress':
+      return `[${now()}] TOOL_PROGRESS step=${event.step} tool=${event.tool} elapsed_ms=${event.elapsedMs} message=${event.message}`
     case 'tool_result':
       return `[${now()}] TOOL_RESULT step=${event.step} tool=${event.tool} ok=${event.ok}\n${shorten(event.output)}`
     case 'oscillation_observe':
@@ -144,8 +148,12 @@ export default class Chat extends Command {
     const config = await loadConfig()
     const rl = createInterface({input: stdIn, output: stdOut, completer: createCompleter()})
     let sessionId = ''
+    let activeTurnAbortController: AbortController | null = null
+    let interruptNotified = false
+    let lastAbortAt = 0
     const startedAt = Date.now()
     let lastEventAt = startedAt
+    let progressLineActive = false
     const bus = new InMemoryEventBus<AgentEvent>()
     const sessionLogSubscriber = new SessionLogSubscriber()
     const metricsSubscriber = new MetricsSubscriber()
@@ -181,6 +189,23 @@ export default class Chat extends Command {
           if (event.type === 'model_response' && !flags.verboseModel) return
           if (event.type === 'final') return
           const base = baseEventLine(event)
+          if (event.type === 'tool_progress') {
+            if (flags.debug) {
+              const nowAt = Date.now()
+              const totalMs = nowAt - startedAt
+              const deltaMs = nowAt - lastEventAt
+              lastEventAt = nowAt
+              this.log(`[debug +${deltaMs}ms total=${totalMs}ms] ${base}`)
+              return
+            }
+            progressLineActive = true
+            stdOut.write(`\r${base}`)
+            return
+          }
+          if (progressLineActive) {
+            stdOut.write('\n')
+            progressLineActive = false
+          }
           if (!flags.debug) {
             this.log(base)
             return
@@ -212,6 +237,16 @@ export default class Chat extends Command {
       this.log(cyan('myclaw chat started. Type /help for commands.'))
 
       rl.on('SIGINT', () => {
+        if (activeTurnAbortController) {
+          if (!interruptNotified) {
+            this.log(red(`[${now()}] interrupt received: aborting active tool execution...`))
+            interruptNotified = true
+          }
+          lastAbortAt = Date.now()
+          activeTurnAbortController.abort()
+          return
+        }
+        if (Date.now() - lastAbortAt < 1500) return
         this.log(cyan('\nInterrupted. Type /exit to quit.'))
       })
 
@@ -331,27 +366,37 @@ export default class Chat extends Command {
           continue
         }
 
-        const output = await runAgentTurn(sessionId, input, {
-          bus,
-          onSensitiveAction: async ({tool, command}) => {
-            if (flags.nonInteractive || !stdIn.isTTY) {
-              this.log(red(`[${now()}] ⚠️ SENSITIVE_REQUEST tool=${tool} auto=deny (non-interactive) command=${command}`))
-              return false
-            }
+        activeTurnAbortController = new AbortController()
+        interruptNotified = false
+        let output = ''
+        try {
+          output = await runAgentTurn(sessionId, input, {
+            bus,
+            abortSignal: activeTurnAbortController.signal,
+            onSensitiveAction: async ({tool, command}) => {
+              if (flags.nonInteractive || !stdIn.isTTY) {
+                this.log(red(`[${now()}] ⚠️ SENSITIVE_REQUEST tool=${tool} auto=deny (non-interactive) command=${command}`))
+                return false
+              }
 
-            this.log(redBold(`[${now()}] 🚨 WAITING FOR USER INPUT`))
-            this.log(red(`[${now()}] ⚠️ SENSITIVE_REQUEST tool=${tool} command=${command}`))
-            const answer = (await rl.question(redBold('🛑 Allow this sensitive command? [y/N] ')))
-              .trim()
-              .toLowerCase()
-            return answer === 'y' || answer === 'yes'
-          }
-        })
+              this.log(redBold(`[${now()}] 🚨 WAITING FOR USER INPUT`))
+              this.log(red(`[${now()}] ⚠️ SENSITIVE_REQUEST tool=${tool} command=${command}`))
+              const answer = (await rl.question(redBold('🛑 Allow this sensitive command? [y/N] ')))
+                .trim()
+                .toLowerCase()
+              return answer === 'y' || answer === 'yes'
+            }
+          })
+        } finally {
+          activeTurnAbortController = null
+          interruptNotified = false
+        }
 
         this.log(cyan('assistant>'))
         this.log(output)
       }
     } finally {
+      if (progressLineActive) stdOut.write('\n')
       if (sessionId) closeAgentSession(sessionId, {bus})
       await Promise.all([sessionLogSubscriber.flush(), metricsSubscriber.flush(), userProfileSubscriber.flush()])
       if (eslintEnabled) await eslintCheckSubscriber.flush()

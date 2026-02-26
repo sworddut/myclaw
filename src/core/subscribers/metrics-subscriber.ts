@@ -74,6 +74,27 @@ export class MetricsSubscriber {
             deltaMs
           })
           break
+        case 'tool_stream':
+          await this.append(event.sessionId, {
+            ts,
+            type: 'tool_stream_metric',
+            step: event.step,
+            tool: event.tool,
+            stream: event.stream,
+            chunkBytes: event.chunk.length,
+            deltaMs
+          })
+          break
+        case 'tool_progress':
+          await this.append(event.sessionId, {
+            ts,
+            type: 'tool_progress_metric',
+            step: event.step,
+            tool: event.tool,
+            elapsedMs: event.elapsedMs,
+            deltaMs
+          })
+          break
         case 'tool_result':
           if (!event.ok) state.toolErrors += 1
           await this.append(event.sessionId, {

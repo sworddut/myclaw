@@ -56,6 +56,10 @@ function baseEventLine(event: AgentEvent): string {
       return `[${now()}] MODEL_RESPONSE step=${event.step}\n${shorten(event.content)}`
     case 'tool_call':
       return `[${now()}] TOOL_CALL step=${event.step} tool=${event.tool} input=${JSON.stringify(event.input)}`
+    case 'tool_stream':
+      return `[${now()}] TOOL_STREAM step=${event.step} tool=${event.tool} stream=${event.stream}\n${shorten(event.chunk, 400)}`
+    case 'tool_progress':
+      return `[${now()}] TOOL_PROGRESS step=${event.step} tool=${event.tool} elapsed_ms=${event.elapsedMs} message=${event.message}`
     case 'tool_result':
       return `[${now()}] TOOL_RESULT step=${event.step} tool=${event.tool} ok=${event.ok}\n${shorten(event.output)}`
     case 'oscillation_observe':
@@ -86,6 +90,7 @@ export default class Run extends Command {
     const config = await loadConfig()
     const startedAt = Date.now()
     let lastEventAt = startedAt
+    let progressLineActive = false
     const bus = new InMemoryEventBus<AgentEvent>()
     const sessionLogSubscriber = new SessionLogSubscriber()
     const metricsSubscriber = new MetricsSubscriber()
@@ -120,6 +125,23 @@ export default class Run extends Command {
           if (event.type === 'model_response' && !flags.verboseModel) return
           if (event.type === 'final') return
           const base = baseEventLine(event)
+          if (event.type === 'tool_progress') {
+            if (flags.debug) {
+              const nowAt = Date.now()
+              const totalMs = nowAt - startedAt
+              const deltaMs = nowAt - lastEventAt
+              lastEventAt = nowAt
+              this.log(`[debug +${deltaMs}ms total=${totalMs}ms] ${base}`)
+              return
+            }
+            progressLineActive = true
+            stdOut.write(`\r${base}`)
+            return
+          }
+          if (progressLineActive) {
+            stdOut.write('\n')
+            progressLineActive = false
+          }
           if (!flags.debug) {
             this.log(base)
             return
@@ -156,6 +178,7 @@ export default class Run extends Command {
         }
       })
     } finally {
+      if (progressLineActive) stdOut.write('\n')
       await Promise.all([sessionLogSubscriber.flush(), metricsSubscriber.flush(), userProfileSubscriber.flush()])
       if (eslintEnabled) await eslintCheckSubscriber.flush()
       unsubscribe()
